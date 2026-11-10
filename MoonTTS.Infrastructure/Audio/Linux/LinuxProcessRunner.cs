@@ -1,22 +1,38 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using MoonTTS.Domain.Audio;
 using MoonTTS.Domain.Common;
 
 namespace MoonTTS.Infrastructure.Audio.Linux;
 
-public class LinuxProcessRunner
+/* File Structure:
+        - Instance : ILinuxCommandRunner
+        - RunCommand(string fileName, string arguments, int timeoutMs) : Result<string>
+        - StartStreamingSession(string fileName, string arguments) : Result<IAudioSinkSession>
+        - SendPauseSignal(int pid) : Result
+        - SendResumeSignal(int pid) : Result
+        - LinuxProcessSinkSession : IAudioSinkSession
+*/
+
+public class LinuxProcessRunner : ILinuxCommandRunner
 {
+    private const int SigCont = 18;
+    private const int SigStop = 19;
+
+    /* Shared singleton adapter instance for default command and subprocess execution */
+    public static ILinuxCommandRunner Instance { get; } = new LinuxProcessRunner();
+
     /* Import to manage Pulse and Pipewire processes */
     [DllImport("libc", SetLastError = true)]
     private static extern int kill(int pid, int sig);
 
-    /* Represents an active Linux sound sink process */
-    public record SinkStreamTarget(
-        Process Process,
-        Stream StandardInput,
-        Func<float> VolumeProvider);
-    
+    /* Explicit interface forwarding to static RunCommand */
+    Result<string> ILinuxCommandRunner.RunCommand(string fileName, string arguments, int timeoutMs) =>
+        RunCommand(fileName, arguments, timeoutMs);
+
+    /* Explicit interface forwarding to static StartStreamingSession */
+    Result<IAudioSinkSession> ILinuxCommandRunner.StartStreamingSession(string fileName, string arguments) =>
+        StartStreamingSession(fileName, arguments);
+
     /* Executes a shell command synchronously with a specified timeout */
     public static Result<string> RunCommand(string fileName, string arguments, int timeoutMs = 1000)
     {
@@ -40,7 +56,7 @@ public class LinuxProcessRunner
 
             if (!proc.WaitForExit(timeoutMs))
             {
-                try { proc.Kill(); } catch { }
+                try { proc.Kill(entireProcessTree: true); } catch { }
                 return Result<string>.Failure($"'{fileName}' timed out after {timeoutMs}ms.");
             }
             return proc.ExitCode == 0 
@@ -52,13 +68,49 @@ public class LinuxProcessRunner
             return Result<string>.Failure($"Failed to execute '{fileName}': {ex.Message}", ex);
         }
     }
+
+    /* Spawns a streaming audio subprocess with redirected stdin wrapped in a self-cleaning IAudioSinkSession */
+    public static Result<IAudioSinkSession> StartStreamingSession(string fileName, string arguments)
+    {
+        Process? proc = null;
+        try
+        {
+            proc = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = fileName,
+                    Arguments = arguments,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                }
+            };
+
+            if (!proc.Start())
+            {
+                proc.Dispose();
+                return Result<IAudioSinkSession>.Failure($"Failed to start '{fileName}'.");
+            }
+
+            return Result<IAudioSinkSession>.Success(
+                new LinuxProcessSinkSession(proc, proc.StandardInput.BaseStream));
+        }
+        catch (Exception ex)
+        {
+            try { proc?.Dispose(); } catch { }
+            return Result<IAudioSinkSession>.Failure($"Failed to execute '{fileName}': {ex.Message}", ex);
+        }
+    }
     
     /* Sends SIGSTOP to a process to pause playback without closing its audio stream */
     public static Result SendPauseSignal(int pid)
     {
         try
         {
-            int ret = kill(pid, 19); // SIGSTOP
+            int ret = kill(pid, SigStop); // SIGSTOP
             return ret == 0 ? Result.Success() : Result.Failure($"kill -STOP failed: {Marshal.GetLastPInvokeError()}");
         }
         catch (Exception ex) { return Result.Failure(ex.Message, ex); }
@@ -69,81 +121,156 @@ public class LinuxProcessRunner
     {
         try
         {
-            int ret = kill(pid, 18); // SIGCONT
+            int ret = kill(pid, SigCont); // SIGCONT
             return ret == 0 ? Result.Success() : Result.Failure($"kill -CONT failed: {Marshal.GetLastPInvokeError()}");
         }
         catch (Exception ex) { return Result.Failure(ex.Message, ex); }
     }
 
-    /* Streams audio chunks into one or more audio sink processes */
-    public static async Task<Result> PipeStreamedAudioAsync(
-        IReadOnlyList<SinkStreamTarget> targets,
-        IAsyncEnumerable<ReadOnlyMemory<byte>> pcmChunks,
-        AudioFormat format,
-        CancellationToken cancellationToken = default)
+    /* Encapsulates an active Linux audio player subprocess (paplay or pw-play) and its stdin pipe */
+    private sealed class LinuxProcessSinkSession(Process process, Stream standardInput) : IAudioSinkSession
     {
-        /* Return early if no output sinks were requested or active */
-        if (targets.Count == 0)
-            return Result.Success();
+        private readonly Lock _stateLock = new();
+        private bool _isDisposed;
 
-        try
+        /* Indicates whether the underlying subprocess is still running and accepting PCM data */
+        public bool IsActive
         {
-            const int chunkSize = 2400; /* About 50ms at 24KHz 16 bit mono */
-            byte[] primaryBuffer = new byte[chunkSize];
-
-            /* Consumes incoming audio chunks as soon as they finish synthesizing */
-            await foreach (var chunk in pcmChunks.WithCancellation(cancellationToken))
+            get
             {
-                if (chunk.Length == 0) continue;
-
-                int remaining = chunk.Length;
-                int currentPos = 0;
-
-                while (remaining > 0 && !cancellationToken.IsCancellationRequested)
+                lock (_stateLock)
                 {
-                    int bytesToWrite = Math.Min(remaining, chunkSize);
+                    if (_isDisposed)
+                        return false;
 
-                    /* Writes to all active targets */
-                    foreach (var target in targets)
+                    try
                     {
-                        if (target.Process.HasExited)
-                            continue;
-                        chunk.Span.Slice(currentPos, bytesToWrite).CopyTo(primaryBuffer);
-
-                        // SIMD volume scaling in-place
-                        float liveVolume = target.VolumeProvider();
-                        SimdAudioProcessor.ScaleVolumeInPlace(primaryBuffer.AsSpan(0, bytesToWrite), liveVolume);
-
-                        // Writes directly to pipe; kernel backpressure paces audio smoothly
-                        await target.StandardInput.WriteAsync(primaryBuffer.AsMemory(0, bytesToWrite), cancellationToken);
-                        await target.StandardInput.FlushAsync(cancellationToken);
+                        return !process.HasExited;
                     }
-
-                    currentPos += bytesToWrite;
-                    remaining -= bytesToWrite;
+                    catch
+                    {
+                        return false;
+                    }
                 }
             }
+        }
 
-            foreach (var target in targets)
+        /* Writes a raw PCM slice to the subprocess standard input pipe and flushes it */
+        public async Task<Result> WriteAsync(ReadOnlyMemory<byte> pcmSlice, CancellationToken cancellationToken = default)
+        {
+            if (pcmSlice.IsEmpty)
+                return Result.Success();
+
+            if (!IsActive)
+                return Result.Failure("Linux audio sink subprocess has exited.");
+
+            try
             {
-                try { target.StandardInput.Close(); } catch { }
+                // Writes directly to pipe; kernel backpressure paces audio smoothly
+                await standardInput.WriteAsync(pcmSlice, cancellationToken);
+                await standardInput.FlushAsync(cancellationToken);
+                return Result.Success();
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                return Result.Failure($"Failed to write PCM slice to Linux audio sink: {ex.Message}", ex);
+            }
+        }
+
+        /* Closes the standard input pipe and waits for the subprocess to finish playing buffered samples */
+        public async Task<Result> CompleteAsync(CancellationToken cancellationToken = default)
+        {
+            lock (_stateLock)
+            {
+                if (_isDisposed)
+                    return Result.Success();
             }
 
-            /* Waits until all player processes finish playing their remaining samples */
-            foreach (var target in targets)
+            try
             {
-                await target.Process.WaitForExitAsync(cancellationToken);
+                try { standardInput.Close(); } catch { }
+                await process.WaitForExitAsync(cancellationToken);
+                return Result.Success();
             }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                return Result.Failure($"Failed while draining Linux audio sink subprocess: {ex.Message}", ex);
+            }
+        }
 
-            return Result.Success();
-        }
-        catch (OperationCanceledException)
+        /* Pauses the underlying subprocess via SIGSTOP */
+        public Result Pause()
         {
-            return Result.Failure("Playback cancelled");
+            lock (_stateLock)
+            {
+                if (_isDisposed)
+                    return Result.Failure("Audio sink session is disposed.");
+
+                try
+                {
+                    if (process.HasExited)
+                        return Result.Failure("Audio sink subprocess has already exited.");
+
+                    return SendPauseSignal(process.Id);
+                }
+                catch (Exception ex)
+                {
+                    return Result.Failure($"Failed to pause Linux audio sink: {ex.Message}", ex);
+                }
+            }
         }
-        catch (Exception ex)
+
+        /* Resumes the paused subprocess via SIGCONT */
+        public Result Resume()
         {
-            return Result.Failure($"Streaming audio failed: {ex.Message}", ex);
+            lock (_stateLock)
+            {
+                if (_isDisposed)
+                    return Result.Failure("Audio sink session is disposed.");
+
+                try
+                {
+                    if (process.HasExited)
+                        return Result.Failure("Audio sink subprocess has already exited.");
+
+                    return SendResumeSignal(process.Id);
+                }
+                catch (Exception ex)
+                {
+                    return Result.Failure($"Failed to resume Linux audio sink: {ex.Message}", ex);
+                }
+            }
+        }
+
+        /* Terminates the subprocess tree if still running and releases all OS handles */
+        public void Dispose()
+        {
+            lock (_stateLock)
+            {
+                if (_isDisposed)
+                    return;
+
+                _isDisposed = true;
+
+                try { standardInput.Close(); } catch { }
+
+                try
+                {
+                    if (!process.HasExited)
+                        process.Kill(entireProcessTree: true);
+                }
+                catch { }
+
+                try { process.Dispose(); } catch { }
+            }
         }
     }
 }

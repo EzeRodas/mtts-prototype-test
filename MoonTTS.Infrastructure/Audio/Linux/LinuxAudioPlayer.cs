@@ -1,15 +1,13 @@
-using System.Diagnostics;
-using MoonTTS.Core.Utilities;
 using MoonTTS.Domain.Audio;
 using MoonTTS.Domain.Common;
 using MoonTTS.Domain.Entities;
 using MoonTTS.Domain.Interfaces;
 using MoonTTS.Infrastructure.Audio.Linux;
 
-
 namespace MoonTTS.Infrastructure.Audio;
 
 /* File Structure:
+        - LinuxAudioPlayer(ILinuxAudioBackend? backend)
         - GetAvailableDevices() : Result<List<AudioDeviceInfo>>
         - SetOutputDevices(string? primaryDeviceId, string? monitorDeviceId) : Result
         - SetVolume(int? primaryVolume, int? monitorVolume) : void
@@ -18,10 +16,13 @@ namespace MoonTTS.Infrastructure.Audio;
         - Pause() : void
         - Resume() : void
         - Stop() : void
+        - ActiveSinkTarget(IAudioSinkSession Session, Func<float> VolumeProvider)
 */
 public class LinuxAudioPlayer : IAudioPlayer
 {
     private const string KeepCurrent = "__keep_current__";
+
+    private readonly ILinuxAudioBackend _backend;
     
     private string? _primaryDeviceId = "-1";
     private string? _monitorDeviceId = null;
@@ -29,56 +30,22 @@ public class LinuxAudioPlayer : IAudioPlayer
     private float _primaryVolume = 1.0f;
     private float _monitorVolume = 1.0f;
 
-    private readonly Lock _processLock = new();
-    private readonly List<Process> _activeProcesses = new();
+    private readonly Lock _sessionLock = new();
+    private readonly List<ActiveSinkTarget> _activeTargets = new();
     
     private CancellationTokenSource? _playbackCts;
     private bool _isPaused = false;
 
-    /*Returns a list with all the available Windows audio output devices visible by the application*/
+    /* Initializes the Linux audio player with the specified or default Linux audio backend */
+    public LinuxAudioPlayer(ILinuxAudioBackend? backend = null)
+    {
+        _backend = backend ?? new LinuxAudioStreamer();
+    }
+
+    /* Returns a list with all the available Linux audio output devices visible by the application */
     public Result<List<AudioDeviceInfo>> GetAvailableDevices()
     {
-        try
-        {
-            var devices = new List<AudioDeviceInfo>
-            {
-                new AudioDeviceInfo
-                {
-                    DeviceId = "-1",
-                    DeviceName = "Default system device"
-                }
-            };
-
-            var micResult = LinuxVirtualMicService.EnsureCreated();
-            if (micResult.IsSuccess)
-            {
-                devices.Add(new AudioDeviceInfo
-                {
-                    DeviceId = LinuxVirtualMicService.SinkName,
-                    DeviceName = "Moon-TTS Virtual Microphone"
-                });
-            }
-
-            var nativeSinks = LinuxDeviceEnumerator.GetSinks();
-            foreach (var s in nativeSinks)
-            {
-                if (devices.All(existing => existing.DeviceId != s.RealName))
-                {
-                    devices.Add(new AudioDeviceInfo
-                    {
-                        DeviceId = s.RealName,
-                        DeviceName = s.DisplayName
-                    });
-                }
-            }
-
-            return Result<List<AudioDeviceInfo>>.Success(devices);
-        }
-        catch (Exception ex)
-        {
-            return Result<List<AudioDeviceInfo>>.Failure(
-                $"Failed to retrieve audio devices: {ex.Message}", ex);
-        }
+        return _backend.GetAvailableDevices();
     }
 
     /* Config */
@@ -86,7 +53,7 @@ public class LinuxAudioPlayer : IAudioPlayer
     /* Sets audio outputs individually or both at the same time */
     public Result SetOutputDevices(string? primaryDeviceId = KeepCurrent, string? monitorDeviceId = KeepCurrent)
     {
-        lock (_processLock)
+        lock (_sessionLock)
         {
             if (primaryDeviceId != KeepCurrent)
                 _primaryDeviceId = !string.IsNullOrWhiteSpace(primaryDeviceId) ? primaryDeviceId : null;
@@ -100,7 +67,7 @@ public class LinuxAudioPlayer : IAudioPlayer
     /* Sets volume levels for each audio output individually or both at the same time */
     public void SetVolume(int? primaryVolume = null, int? monitorVolume = null)
     {
-        lock (_processLock)
+        lock (_sessionLock)
         {
             if (primaryVolume.HasValue)
                 _primaryVolume = Math.Clamp(primaryVolume.Value, 0, 100) / 100.0f;
@@ -135,7 +102,7 @@ public class LinuxAudioPlayer : IAudioPlayer
         string? monitorId;
 
         /* Snapshots current device ID inside the lock */
-        lock (_processLock)
+        lock (_sessionLock)
         {
             primaryId = _primaryDeviceId;
             monitorId = _monitorDeviceId;
@@ -153,44 +120,145 @@ public class LinuxAudioPlayer : IAudioPlayer
 
         /* Sets up the linked cts for this session */
         CancellationToken linkedToken;
-        lock (_processLock)
+        lock (_sessionLock)
         {
             _playbackCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             linkedToken = _playbackCts.Token;
             _isPaused = false;
         }
 
-        var targets = new List<LinuxProcessRunner.SinkStreamTarget>();
-
-        void RegisterProcess(Process p)
-        {
-            lock (_processLock)
-            {
-                _activeProcesses.Add(p);
-            }
-        }
+        var sessionTargets = new List<ActiveSinkTarget>();
+        string? lastOpenError = null;
 
         if (playPrimary)
         {
-            string? targetSink = primaryId == "-1" ? null : primaryId;
-            var session = LinuxAudioStreamer.StartSinkSession(targetSink, format, () => _primaryVolume, RegisterProcess);
-            if (session.IsSuccess && session.Value != null) targets.Add(session.Value);
+            var session = _backend.OpenSinkSession(primaryId, format);
+            if (session.IsSuccess && session.Value != null)
+            {
+                var target = new ActiveSinkTarget(session.Value, () => _primaryVolume);
+                lock (_sessionLock)
+                {
+                    _activeTargets.Add(target);
+                }
+                sessionTargets.Add(target);
+            }
+            else
+            {
+                lastOpenError = session.ErrorMessage;
+            }
         }
         
-        /* Lauches secondary audio process if any */
+        /* Launches secondary audio sink session if any */
         if (playMonitor)
         {
-            string? targetSink = monitorId == "-1" ? null : monitorId;
-            var session = LinuxAudioStreamer.StartSinkSession(targetSink, format, () => _monitorVolume, RegisterProcess);
-            if (session.IsSuccess && session.Value != null) targets.Add(session.Value);
+            var session = _backend.OpenSinkSession(monitorId, format);
+            if (session.IsSuccess && session.Value != null)
+            {
+                var target = new ActiveSinkTarget(session.Value, () => _monitorVolume);
+                lock (_sessionLock)
+                {
+                    _activeTargets.Add(target);
+                }
+                sessionTargets.Add(target);
+            }
+            else
+            {
+                lastOpenError = session.ErrorMessage;
+            }
         }
         
-        if (targets.Count == 0)
-            return Result.Failure("Failed to initialize any Linux audio output stream targets.");
+        if (sessionTargets.Count == 0)
+        {
+            return Result.Failure(
+                lastOpenError ?? "Failed to initialize any Linux audio output stream targets.");
+        }
+
+        int bytesPerSample = Math.Max(format.BitDepth / 8, 1);
+        int blockAlign = Math.Max(format.Channels * bytesPerSample, 1);
+        int bytesPerSecond = Math.Max(format.SampleRate * blockAlign, blockAlign);
+        /* ~50ms slice aligned to block boundary */
+        int sliceSize = Math.Max((bytesPerSecond / 20) / blockAlign * blockAlign, blockAlign);
+        byte[] scratchBuffer = new byte[sliceSize];
+        string? lastWriteError = null;
 
         try
         {
-            return await LinuxProcessRunner.PipeStreamedAudioAsync(targets, pcmChunks, format, linkedToken);
+            /* Consumes incoming audio chunks as soon as they finish synthesizing */
+            await foreach (var chunk in pcmChunks.WithCancellation(linkedToken))
+            {
+                if (chunk.Length == 0)
+                    continue;
+
+                int remaining = chunk.Length;
+                int currentPos = 0;
+
+                while (remaining > 0 && !linkedToken.IsCancellationRequested)
+                {
+                    int bytesToWrite = Math.Min(remaining, sliceSize);
+                    /* Keep multi-byte samples aligned */
+                    if (bytesToWrite > blockAlign)
+                        bytesToWrite -= bytesToWrite % blockAlign;
+
+                    int activeCount = 0;
+
+                    /* Writes to all active targets with per-sink error isolation */
+                    foreach (var target in sessionTargets)
+                    {
+                        if (!target.Session.IsActive)
+                            continue;
+
+                        chunk.Span.Slice(currentPos, bytesToWrite).CopyTo(scratchBuffer);
+
+                        // SIMD volume scaling in-place
+                        float liveVolume = target.VolumeProvider();
+                        SimdAudioProcessor.ScaleVolumeInPlace(scratchBuffer.AsSpan(0, bytesToWrite), liveVolume);
+
+                        var writeRes = await target.Session.WriteAsync(
+                            scratchBuffer.AsMemory(0, bytesToWrite),
+                            linkedToken);
+
+                        if (writeRes.IsFailure)
+                        {
+                            lastWriteError = writeRes.ErrorMessage;
+                            target.Session.Dispose();
+                        }
+                        else
+                        {
+                            activeCount++;
+                        }
+                    }
+
+                    if (activeCount == 0)
+                    {
+                        return Result.Failure(
+                            lastWriteError ?? "All Linux audio output sinks terminated during playback.");
+                    }
+
+                    currentPos += bytesToWrite;
+                    remaining -= bytesToWrite;
+                }
+            }
+
+            /* Waits until all active sink sessions finish draining their remaining samples */
+            foreach (var target in sessionTargets)
+            {
+                if (!target.Session.IsActive)
+                    continue;
+
+                var drainRes = await target.Session.CompleteAsync(linkedToken);
+                if (drainRes.IsFailure)
+                    lastWriteError = drainRes.ErrorMessage;
+            }
+
+            return Result.Success();
+        }
+        catch (OperationCanceledException)
+        {
+            return Result.Failure("Playback cancelled");
+        }
+        catch (Exception ex)
+        {
+            return Result.Failure($"Streaming audio failed: {ex.Message}", ex);
         }
         finally
         {
@@ -198,54 +266,62 @@ public class LinuxAudioPlayer : IAudioPlayer
         }
     }
 
-    /* Pauses playback on all active sink processes via SIGSTOP */
+    /* Pauses playback on all active sink sessions */
     public void Pause()
     {
-        lock (_processLock)
+        lock (_sessionLock)
         {
             if (_isPaused) return;
-            foreach (var proc in _activeProcesses.Where(p => !p.HasExited))
+            foreach (var target in _activeTargets)
             {
-                LinuxProcessRunner.SendPauseSignal(proc.Id);
+                if (target.Session.IsActive)
+                {
+                    target.Session.Pause();
+                }
             }
             _isPaused = true;
         }
     }
 
-    /* Resumes playback on all paused sink processes via SIGCONT */
+    /* Resumes playback on all paused sink sessions */
     public void Resume()
     {
-        lock (_processLock)
+        lock (_sessionLock)
         {
             if (!_isPaused) return;
-            foreach (var proc in _activeProcesses.Where(p => !p.HasExited))
+            foreach (var target in _activeTargets)
             {
-                LinuxProcessRunner.SendResumeSignal(proc.Id);
+                if (target.Session.IsActive)
+                {
+                    target.Session.Resume();
+                }
             }
             _isPaused = false;
         }
     }
 
-    /* Immediately terminates playback and disposes of all spawned audio processes */
+    /* Immediately terminates playback and disposes of all active audio sink sessions */
     public void Stop()
     {
-        lock (_processLock)
+        lock (_sessionLock)
         {
             _playbackCts?.Cancel();
             _playbackCts?.Dispose();
             _playbackCts = null;
 
-            foreach (var proc in _activeProcesses)
+            foreach (var target in _activeTargets)
             {
                 try
                 {
-                    if (!proc.HasExited) proc.Kill(entireProcessTree: true);
-                    proc.Dispose();
+                    target.Session.Dispose();
                 }
                 catch { }
             }
-            _activeProcesses.Clear();
+            _activeTargets.Clear();
             _isPaused = false;
         }
     }
+
+    /* Binds an active audio sink session with its live volume provider */
+    private sealed record ActiveSinkTarget(IAudioSinkSession Session, Func<float> VolumeProvider);
 }

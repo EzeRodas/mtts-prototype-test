@@ -34,10 +34,16 @@
   • Dependency category: Remote but owned (Ports & Adapters).
   • Test impact: Replaces external pipe tests with fast in-memory duplex stream tests verifying protocol framing, cancellation, and streaming behavior.
   
-### Candidate 4: Audio Sink Abstraction & Subprocess Decoupling [PENDING]
+### Candidate 4: Audio Sink Abstraction & Subprocess Decoupling [COMPLETED]
 
   • Cluster: IAudioPlayer, LinuxAudioPlayer, LinuxAudioStreamer, LinuxProcessRunner, LinuxDeviceEnumerator, LinuxVirtualMicService
   • Why they're coupled: LinuxAudioPlayer manages sub-processes (paplay, pw-play), sends raw POSIX signals (SIGSTOP/SIGCONT), handles dual-output multiplexing (primary + monitor), and manages process lifecycle with low-level locks.
   • The "Code Judo" Move: Deepen IAudioPlayer behind a resilient audio sink abstraction. Caller passes audio streams and target sink IDs without knowing about process IDs, pipehandles, or fallback chains. Encapsulates subprocess lifecycle, eliminates process leakrisks on cancellation, and centralizes error recovery.
   • Dependency category: Ports & Adapters.
   • Test impact: Replaces complex subprocess mocking with an audio sink port adapter testsuite.
+  • Implementation Notes:
+    - Introduced `IAudioSinkSession`, `ILinuxAudioBackend`, and `ILinuxCommandRunner` ports in `MoonTTS.Infrastructure/Audio/Linux/`.
+    - Encapsulated `Process`, `StandardInput` stream, `SIGSTOP`/`SIGCONT` POSIX signaling, and deterministic process-tree cleanup inside `LinuxProcessRunner.LinuxProcessSinkSession`.
+    - Refactored `LinuxAudioStreamer` (`ILinuxAudioBackend`) to manage device discovery (`LinuxVirtualMicService` + `LinuxDeviceEnumerator`), dynamic sample format resolution from `AudioFormat`, and the `paplay` -> `pw-play` fallback chain.
+    - Decoupled `LinuxAudioPlayer` from `System.Diagnostics.Process` and OS signaling; it now orchestrates dual-sink multiplexing, dynamic 50ms block-aligned slicing, SIMD volume scaling, and per-sink error isolation over `IAudioSinkSession`.
+    - Fixed `LinuxDeviceEnumerator.ParseWpctlSinks` regex capture groups and converted it to an AOT-compiled `[GeneratedRegex]`.
