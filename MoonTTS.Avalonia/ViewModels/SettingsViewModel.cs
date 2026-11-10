@@ -15,7 +15,7 @@ namespace MoonTTS.Avalonia.ViewModels;
 /* File Structure:
         - AdvancedTab (Enum)
         - ModelStatusItem (Class)
-        - SettingsViewModel(SettingsManager, IAudioPlayer, IWindowService, DownloadManager, DictionaryManager?, HotkeyManager?, HistoryManager?, TtsEngineProvider?)
+        - SettingsViewModel(SettingsManager, IAudioPlayer, IWindowService, DownloadManager, DictionaryManager?, HotkeyManager?, HistoryManager?, ITtsEngineProvider?, ProfileManager?)
         - IsLinux : bool
         - LoadAudioDevices() : void
         - LoadTtsEngines() : void
@@ -23,6 +23,8 @@ namespace MoonTTS.Avalonia.ViewModels;
         - RefreshVoicesAsync() : Task
         - SelectVoiceFromConfig() : void
         - LoadSettings() : void
+        - LoadProfiles() : void
+        - RefreshHotkeyEntries() : void
         - LoadModelStatuses() : void
         - ShowModelStatusAsync(string message) : void
         - SwitchModelAsync(ModelMetadata model) : Task
@@ -33,6 +35,11 @@ namespace MoonTTS.Avalonia.ViewModels;
         - SelectTab(AdvancedTab) : void
         - AddDictionaryEntry() : void
         - DeleteDictionaryEntry(Guid) : void
+        - StartAddProfile() : void
+        - StartRenameProfile() : void
+        - ConfirmAddProfile() : void
+        - CancelAddProfile() : void
+        - DeleteProfile() : void
         - AddHotkeyPhraseAsync() : Task
         - DeleteHotkeyPhrase(Guid) : void
         - PlayHistoryItemAsync(Guid) : Task
@@ -126,6 +133,7 @@ public partial class SettingsViewModel : ViewModelBase
     private readonly HotkeyManager? _hotkeyManager;
     private readonly HistoryManager? _historyManager;
     private readonly ITtsEngineProvider? _engineProvider;
+    private readonly ProfileManager? _profileManager;
 
     private bool _isLoading;
 
@@ -192,6 +200,23 @@ public partial class SettingsViewModel : ViewModelBase
 
     /* Hotkey Settings */
     [ObservableProperty]
+    private HotkeyProfile? _selectedProfile;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsEditingProfile))]
+    private bool _isAddingProfile;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsEditingProfile))]
+    private bool _isRenamingProfile;
+
+    [ObservableProperty]
+    private string _newProfileName = string.Empty;
+
+    /* True when either creating a new profile or renaming the selected profile via the editable row */
+    public bool IsEditingProfile => IsAddingProfile || IsRenamingProfile;
+
+    [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(ToggleHotkeyDisplayText))]
     private string _toggleAppHotkey = "Ctrl+Alt+M";
 
@@ -227,13 +252,14 @@ public partial class SettingsViewModel : ViewModelBase
     public ObservableCollection<VoiceInfo> AvailableVoices { get; } = new();
     public ObservableCollection<AudioDeviceInfo> AvailableOutputDevices { get; } = new();
     public ObservableCollection<DictionaryEntry> DictionaryEntries { get; } = new();
+    public ObservableCollection<HotkeyProfile> AvailableProfiles { get; } = new();
     public ObservableCollection<HotkeyEntry> HotkeyEntries { get; } = new();
     public ObservableCollection<HistoryEntry> HistoryEntries { get; } = new();
     public ObservableCollection<ModelStatusItem> ModelStatuses { get; } = new();
 
     /* Constructor for previewer */
     protected SettingsViewModel()
-        : this(null!, null!, null!, null!, null!, null!, null!, null!) { }
+        : this(null!, null!, null!, null!, null!, null!, null!, null!, null!) { }
 
     /* Main Constructor */
     public SettingsViewModel(
@@ -244,7 +270,8 @@ public partial class SettingsViewModel : ViewModelBase
         DictionaryManager? dictManager = null,
         HotkeyManager? hotkeyManager = null,
         HistoryManager? historyManager = null,
-        ITtsEngineProvider? engineProvider = null
+        ITtsEngineProvider? engineProvider = null,
+        ProfileManager? profileManager = null
     )
     {
         _settingsManager = settingsManager;
@@ -255,6 +282,7 @@ public partial class SettingsViewModel : ViewModelBase
         _hotkeyManager = hotkeyManager;
         _historyManager = historyManager;
         _engineProvider = engineProvider;
+        _profileManager = profileManager;
 
         if (_settingsManager != null && _audioPlayer != null)
         {
@@ -467,6 +495,9 @@ public partial class SettingsViewModel : ViewModelBase
             CustomModelsDirectory = appConfig.CustomModelsDirectory ?? string.Empty;
 
             CancelRecording();
+            IsAddingProfile = false;
+            IsRenamingProfile = false;
+            NewProfileName = string.Empty;
 
             if (_dictManager != null)
             {
@@ -475,12 +506,8 @@ public partial class SettingsViewModel : ViewModelBase
                     DictionaryEntries.Add(entry);
             }
 
-            if (_hotkeyManager != null)
-            {
-                HotkeyEntries.Clear();
-                foreach (var hk in _hotkeyManager.GetHotkeys())
-                    HotkeyEntries.Add(hk);
-            }
+            LoadProfiles();
+            RefreshHotkeyEntries();
 
             if (_historyManager != null)
             {
@@ -493,6 +520,33 @@ public partial class SettingsViewModel : ViewModelBase
         {
             _isLoading = false;
         }
+    }
+
+    /* Populates available hotkey profiles and selects the currently active profile */
+    private void LoadProfiles()
+    {
+        if (_profileManager == null)
+            return;
+
+        AvailableProfiles.Clear();
+        foreach (var profile in _profileManager.GetProfiles())
+            AvailableProfiles.Add(profile);
+
+        var active = _profileManager.GetActiveProfiles();
+        SelectedProfile = AvailableProfiles.FirstOrDefault(p =>
+            string.Equals(p.Name, active.Name, StringComparison.OrdinalIgnoreCase))
+            ?? AvailableProfiles.FirstOrDefault();
+    }
+
+    /* Reloads the hotkey entries collection for the currently active profile */
+    private void RefreshHotkeyEntries()
+    {
+        if (_hotkeyManager == null)
+            return;
+
+        HotkeyEntries.Clear();
+        foreach (var hk in _hotkeyManager.GetHotkeys())
+            HotkeyEntries.Add(hk);
     }
 
     /* Auto-save triggers */
@@ -635,6 +689,23 @@ public partial class SettingsViewModel : ViewModelBase
         }
 
         AutoSave();
+    }
+
+    /* Switches the active hotkey profile when the user selects a different profile from the ComboBox */
+    partial void OnSelectedProfileChanged(HotkeyProfile? value)
+    {
+        if (_isLoading || _profileManager == null || value == null)
+            return;
+
+        var res = _profileManager.SetActiveProfile(value.Name);
+        if (res.IsSuccess)
+        {
+            RefreshHotkeyEntries();
+        }
+        else
+        {
+            ShowModelStatusAsync(res.ErrorMessage ?? "Failed to switch profile.");
+        }
     }
 
     partial void OnEnablePrimaryPlaybackChanged(bool value) => AutoSave();
@@ -839,6 +910,125 @@ public partial class SettingsViewModel : ViewModelBase
     }
 
     /* Hotkey Actions */
+    /* Enters the inline editable row mode to create a new hotkey profile */
+    [RelayCommand]
+    private void StartAddProfile()
+    {
+        NewProfileName = string.Empty;
+        IsRenamingProfile = false;
+        IsAddingProfile = true;
+    }
+
+    /* Enters the inline editable row mode to rename the currently selected hotkey profile */
+    [RelayCommand]
+    private void StartRenameProfile()
+    {
+        if (SelectedProfile == null)
+            return;
+
+        NewProfileName = SelectedProfile.Name;
+        IsAddingProfile = false;
+        IsRenamingProfile = true;
+    }
+
+    /* Confirms creating a new profile or renaming the selected profile, and exits the editable row mode */
+    [RelayCommand]
+    private void ConfirmAddProfile()
+    {
+        if (_profileManager == null || string.IsNullOrWhiteSpace(NewProfileName))
+            return;
+
+        string targetName = NewProfileName.Trim();
+
+        if (IsRenamingProfile)
+        {
+            if (SelectedProfile == null)
+                return;
+
+            var renameRes = _profileManager.RenameProfile(SelectedProfile.Name, targetName);
+            if (renameRes.IsSuccess)
+            {
+                NewProfileName = string.Empty;
+                IsRenamingProfile = false;
+
+                _isLoading = true;
+                try
+                {
+                    LoadProfiles();
+                    RefreshHotkeyEntries();
+                }
+                finally
+                {
+                    _isLoading = false;
+                }
+            }
+            else
+            {
+                ShowModelStatusAsync(renameRes.ErrorMessage ?? "Failed to rename profile.");
+            }
+            return;
+        }
+
+        var createRes = _profileManager.CreateProfile(targetName);
+        if (createRes.IsSuccess)
+        {
+            _profileManager.SetActiveProfile(targetName);
+            NewProfileName = string.Empty;
+            IsAddingProfile = false;
+
+            _isLoading = true;
+            try
+            {
+                LoadProfiles();
+                RefreshHotkeyEntries();
+            }
+            finally
+            {
+                _isLoading = false;
+            }
+        }
+        else
+        {
+            ShowModelStatusAsync(createRes.ErrorMessage ?? "Failed to create profile.");
+        }
+    }
+
+    /* Cancels creating or renaming a hotkey profile and restores the profile selector row */
+    [RelayCommand]
+    private void CancelAddProfile()
+    {
+        NewProfileName = string.Empty;
+        IsAddingProfile = false;
+        IsRenamingProfile = false;
+    }
+
+    /* Deletes the currently selected hotkey profile and refreshes the active profile and its hotkeys */
+    [RelayCommand]
+    private void DeleteProfile()
+    {
+        if (_profileManager == null || SelectedProfile == null)
+            return;
+
+        var res = _profileManager.DeleteProfile(SelectedProfile.Name);
+        if (res.IsSuccess)
+        {
+            _isLoading = true;
+            try
+            {
+                LoadProfiles();
+                RefreshHotkeyEntries();
+            }
+            finally
+            {
+                _isLoading = false;
+            }
+        }
+        else
+        {
+            ShowModelStatusAsync(res.ErrorMessage ?? "Failed to delete profile.");
+        }
+    }
+
     [RelayCommand]
     private async Task AddHotkeyPhraseAsync()
     {
@@ -856,9 +1046,7 @@ public partial class SettingsViewModel : ViewModelBase
         {
             NewHotkeyKey = string.Empty;
             NewHotkeyPhrase = string.Empty;
-            HotkeyEntries.Clear();
-            foreach (var hk in _hotkeyManager.GetHotkeys())
-                HotkeyEntries.Add(hk);
+            RefreshHotkeyEntries();
         }
         else
         {
@@ -874,9 +1062,7 @@ public partial class SettingsViewModel : ViewModelBase
         var res = _hotkeyManager.DeleteHotkey(id);
         if (res.IsSuccess)
         {
-            HotkeyEntries.Clear();
-            foreach (var hk in _hotkeyManager.GetHotkeys())
-                HotkeyEntries.Add(hk);
+            RefreshHotkeyEntries();
         }
     }
 

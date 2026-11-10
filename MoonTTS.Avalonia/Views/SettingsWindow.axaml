@@ -496,8 +496,9 @@
                             </StackPanel>
 
                             <!-- Hotkeys Tab -->
-                            <StackPanel Spacing="16" IsVisible="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.Hotkeys}}">
+                            <StackPanel Spacing="8" IsVisible="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.Hotkeys}}">
                                 <TextBlock Text="Global Hotkeys" Classes="section-title"/>
+
                                 <TextBlock Text="Global Toggle Shortcut" Classes="field-label"/>
 
                                 <!-- Global Toggle Hotkey Detection -->
@@ -511,6 +512,49 @@
                                             Command="{Binding ToggleRecordingToggleHotkeyCommand}"
                                             Classes="btn-primary" Margin="8,0,0,0"/>
                                 </Grid>
+
+                                <TextBlock Text="Active Profile" Classes="field-label"/>
+                                <!-- Profile Selector & Editable Row Swap -->
+                                <Panel>
+                                    <!-- Normal Selector Mode -->
+                                    <Grid ColumnDefinitions="*,Auto,Auto,Auto" IsVisible="{Binding !IsEditingProfile}">
+                                        <ComboBox ItemsSource="{Binding AvailableProfiles}"
+                                                  SelectedItem="{Binding SelectedProfile}"
+                                                  HorizontalAlignment="Stretch">
+                                            <ComboBox.ItemTemplate>
+                                                <DataTemplate x:DataType="entities:HotkeyProfile">
+                                                    <TextBlock Text="{Binding Name}"/>
+                                                </DataTemplate>
+                                            </ComboBox.ItemTemplate>
+                                        </ComboBox>
+                                        <Button Grid.Column="1" Content="Add"
+                                                Command="{Binding StartAddProfileCommand}"
+                                                Classes="btn-primary" Margin="8,0,0,0" Cursor="Hand"/>
+                                        <Button Grid.Column="2" Content="Rename"
+                                                Command="{Binding StartRenameProfileCommand}"
+                                                Classes="btn-primary" Margin="6,0,0,0" Cursor="Hand"/>
+                                        <Button Grid.Column="3" Content="Delete"
+                                                Command="{Binding DeleteProfileCommand}"
+                                                Classes="btn-danger" Margin="6,0,0,0" Cursor="Hand"/>
+                                    </Grid>
+
+                                    <!-- Editable Row Swap Mode -->
+                                    <Grid ColumnDefinitions="*,Auto,Auto" IsVisible="{Binding IsEditingProfile}">
+                                        <TextBox Text="{Binding NewProfileName}"
+                                                 PlaceholderText="Profile name..."
+                                                 HorizontalAlignment="Stretch">
+                                            <TextBox.KeyBindings>
+                                                <KeyBinding Gesture="Enter" Command="{Binding ConfirmAddProfileCommand}"/>
+                                            </TextBox.KeyBindings>
+                                        </TextBox>
+                                        <Button Grid.Column="1" Content="Save"
+                                                Command="{Binding ConfirmAddProfileCommand}"
+                                                Classes="btn-primary" Margin="8,0,0,0" Cursor="Hand"/>
+                                        <Button Grid.Column="2" Content="Cancel"
+                                                Command="{Binding CancelAddProfileCommand}"
+                                                Classes="btn-danger" Margin="6,0,0,0" Cursor="Hand"/>
+                                    </Grid>
+                                </Panel>
 
                                 <Border Classes="card-section">
                                     <StackPanel Spacing="10">

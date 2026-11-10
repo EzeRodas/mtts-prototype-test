@@ -10,6 +10,7 @@ namespace MoonTTS.Core.Services;
         - GetProfiles() : IReadOnlyList<HotkeyProfile>
         - GetActiveProfiles() : HotkeyProfile
         - CreateProfile(string name) : Result
+        - RenameProfile(string oldName, string newName) : Result
         - SetActiveProfile(string name) : Result
         - DeleteProfile(string name) : Result
         - DeleteProfileFolder(string folderName) : void
@@ -31,7 +32,7 @@ public class ProfileManager
     public ProfileManager(IConfigurationRepository repo)
     {
         _repo = repo;
-        _hotkeysDir = Path.Combine(PathResolver.GetConfigDirectory(),"audio", "hotkeys");
+        _hotkeysDir = Path.Combine(PathResolver.GetConfigDirectory(), "audio", "profiles");
         Directory.CreateDirectory(_hotkeysDir);
 
         /* Passes the repository thread so the UI can update */
@@ -124,6 +125,90 @@ public class ProfileManager
         return Result.Success();
     }
 
+    /* Renames an existing hotkey profile and updates its folder on disk */
+    public Result RenameProfile(string oldName, string newName)
+    {
+        if (string.IsNullOrWhiteSpace(oldName))
+            return Result.Failure("Current profile name cannot be empty.");
+        if (string.IsNullOrWhiteSpace(newName))
+            return Result.Failure("New profile name cannot be empty.");
+
+        string trimmedOld = oldName.Trim();
+        string trimmedNew = newName.Trim();
+
+        var target = Store.Profiles.FirstOrDefault(p =>
+            string.Equals(p.Name, trimmedOld, StringComparison.OrdinalIgnoreCase));
+
+        if (target == null)
+            return Result.Failure($"Profile '{trimmedOld}' was not found.");
+
+        if (string.Equals(target.Name, trimmedNew, StringComparison.Ordinal))
+            return Result.Success();
+
+        if (Store.Profiles.Any(p =>
+                !ReferenceEquals(p, target) &&
+                string.Equals(p.Name, trimmedNew, StringComparison.OrdinalIgnoreCase)))
+        {
+            return Result.Failure($"A profile named '{trimmedNew}' already exists.");
+        }
+
+        string baseFolder = PathSanitizer.SanitizeFolderName(trimmedNew);
+        string uniqueFolder = baseFolder;
+        int counter = 1;
+
+        while (Store.Profiles.Any(p =>
+                   !ReferenceEquals(p, target) &&
+                   string.Equals(p.FolderName, uniqueFolder, StringComparison.OrdinalIgnoreCase)) ||
+               (!string.Equals(target.FolderName, uniqueFolder, StringComparison.OrdinalIgnoreCase) &&
+                Directory.Exists(Path.Combine(_hotkeysDir, uniqueFolder))))
+        {
+            uniqueFolder = $"{baseFolder}({counter++})";
+        }
+
+        string oldFolderPath = Path.Combine(_hotkeysDir, target.FolderName);
+        string newFolderPath = Path.Combine(_hotkeysDir, uniqueFolder);
+
+        if (!string.Equals(oldFolderPath, newFolderPath, StringComparison.Ordinal))
+        {
+            try
+            {
+                if (Directory.Exists(oldFolderPath))
+                    Directory.Move(oldFolderPath, newFolderPath);
+                else
+                    Directory.CreateDirectory(newFolderPath);
+            }
+            catch (Exception ex)
+            {
+                return Result.Failure($"Failed to rename profile folder: {ex.Message}", ex);
+            }
+        }
+
+        bool wasActive = string.Equals(Store.ActiveProfileName, target.Name, StringComparison.OrdinalIgnoreCase);
+
+        var newStore = new ProfileDataStore
+        {
+            ActiveProfileName = wasActive ? trimmedNew : Store.ActiveProfileName,
+            Profiles = Store.Profiles.Select(p => ReferenceEquals(p, target)
+                ? new HotkeyProfile
+                {
+                    Name = trimmedNew,
+                    FolderName = uniqueFolder,
+                    Entries = p.Entries
+                }
+                : p).ToList()
+        };
+
+        _repo.SaveProfileData(newStore);
+        if (wasActive)
+        {
+            var updated = newStore.Profiles.First(p =>
+                string.Equals(p.Name, trimmedNew, StringComparison.OrdinalIgnoreCase));
+            ActiveProfileChanged?.Invoke(updated);
+        }
+
+        return Result.Success();
+    }
+
     /* Deletes a profile by name and falls back to default profile if the deleted profile was active */
     public Result DeleteProfile(string name)
     {
@@ -182,12 +267,13 @@ public class ProfileManager
         return Result.Success();
     }
     
+    /* Deletes a profile's folder and all contained audio and configuration files from disk */
     private void DeleteProfileFolder(string folderName)
     {
         string folderPath = Path.Combine(_hotkeysDir, folderName);
         if (Directory.Exists(folderPath))
         {
-            try { Directory.Delete(folderPath); } catch { /* Ignore if locked */ }
+            try { Directory.Delete(folderPath, recursive: true); } catch { /* Ignore if locked */ }
         }
     }
 }

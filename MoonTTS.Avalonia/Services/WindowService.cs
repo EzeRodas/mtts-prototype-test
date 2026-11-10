@@ -11,7 +11,7 @@ using MoonTTS.Domain.Interfaces;
 namespace MoonTTS.Avalonia.Services;
 
 /* File Structure:
-        - WindowService(MainWindow, IClassicDesktopStyleApplicationLifetime, SettingsManager, IAudioPlayer, DownloadManager, DictionaryManager, HotkeyManager, HistoryManager, ITtsEngineProvider, IWindowOverlayHelper)
+        - WindowService(MainWindow, IClassicDesktopStyleApplicationLifetime, SettingsManager, IAudioPlayer, DownloadManager, DictionaryManager, HotkeyManager, HistoryManager, ITtsEngineProvider, IWindowOverlayHelper, ProfileManager?)
         - OnMainWindowOpened(object?, EventArgs) : void
         - OnMainWindowActivated(object?, EventArgs) : void
         - OnMainWindowDeactivated(object?, EventArgs) : void
@@ -47,6 +47,7 @@ public class WindowService : IWindowService
     private readonly HistoryManager _historyManager;
     private readonly ITtsEngineProvider _engineProvider;
     private readonly IWindowOverlayHelper _overlayHelper;
+    private readonly ProfileManager? _profileManager;
 
     /* Initializes window service with main window, desktop lifetime, and settings */
     public WindowService(
@@ -59,7 +60,8 @@ public class WindowService : IWindowService
         HotkeyManager hotkeyManager,
         HistoryManager historyManager,
         ITtsEngineProvider engineProvider,
-        IWindowOverlayHelper overlayHelper)
+        IWindowOverlayHelper overlayHelper,
+        ProfileManager? profileManager = null)
     {
         _mainWindow = mainWindow;
         _desktop = desktop;
@@ -71,6 +73,7 @@ public class WindowService : IWindowService
         _historyManager = historyManager;
         _engineProvider = engineProvider;
         _overlayHelper = overlayHelper;
+        _profileManager = profileManager;
 
         _mainWindow.Opened += OnMainWindowOpened;
         _mainWindow.Activated += OnMainWindowActivated;
@@ -334,7 +337,8 @@ public class WindowService : IWindowService
                 _dictionaryManager,
                 _hotkeyManager,
                 _historyManager,
-                _engineProvider);
+                _engineProvider,
+                _profileManager);
             _settingsWindow = new SettingsWindow
             {
                 DataContext = viewModel

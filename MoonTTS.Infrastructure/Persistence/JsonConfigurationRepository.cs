@@ -58,7 +58,7 @@ public class JsonConfigurationRepository : IConfigurationRepository
         DictionaryEntries = LoadInternal("dictionary.json", AppJsonContext.Default.ListDictionaryEntry) 
                             ?? new List<DictionaryEntry>();
         
-        string profilesPath = Path.Combine("audio", "hotkeys", "profiles.json");
+        string profilesPath = Path.Combine("audio", "profiles", "profiles.json");
         ProfileData = LoadInternal(profilesPath, AppJsonContext.Default.ProfileDataStore) 
                             ?? new ProfileDataStore();
 
@@ -77,7 +77,7 @@ public class JsonConfigurationRepository : IConfigurationRepository
         }
         
         string activeFolder = GetActiveProfileFolder();
-        string hotkeysPath = Path.Combine("audio", "hotkeys", activeFolder, "hotkeys.json");
+        string hotkeysPath = Path.Combine("audio", "profiles", activeFolder, "hotkeys.json");
         Hotkeys = LoadInternal(hotkeysPath, AppJsonContext.Default.ListHotkeyEntry) 
                       ?? new List<HotkeyEntry>();
 
@@ -103,9 +103,9 @@ public class JsonConfigurationRepository : IConfigurationRepository
     public void SaveProfileData(ProfileDataStore profile)
     {
         ProfileData = profile;
-        string path = Path.Combine("audio", "hotkeys", "profiles.json");
+        string path = Path.Combine("audio", "profiles", "profiles.json");
         SaveInternal(path, ProfileData, AppJsonContext.Default.ProfileDataStore);
-        
+        ProfilesChanged?.Invoke();
     }
 
     public void SaveHotkeys(List<HotkeyEntry> entries)
@@ -115,7 +115,7 @@ public class JsonConfigurationRepository : IConfigurationRepository
 
         /* Saves to the currently active subfolder */
         string activeFolder = GetActiveProfileFolder();
-        string path = Path.Combine("audio", "hotkeys", activeFolder, "hotkeys.json");
+        string path = Path.Combine("audio", "profiles", activeFolder, "hotkeys.json");
 
         SaveInternal(path, entriesList, AppJsonContext.Default.ListHotkeyEntry);
         HotkeysChanged?.Invoke();
@@ -214,7 +214,7 @@ public class JsonConfigurationRepository : IConfigurationRepository
         
         /* Swaps the hotkeys in memory to match the new profile */
         string activeFolder = GetActiveProfileFolder();
-        string hotkeysPath = Path.Combine("audio", "hotkeys", activeFolder, "hotkeys.json");
+        string hotkeysPath = Path.Combine("audio", "profiles", activeFolder, "hotkeys.json");
         Hotkeys = LoadInternal(hotkeysPath, AppJsonContext.Default.ListHotkeyEntry) ?? new List<HotkeyEntry>();
         
         HotkeysChanged?.Invoke();

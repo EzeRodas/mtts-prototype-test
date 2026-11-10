@@ -58,6 +58,7 @@ public partial class App : Application
             var dictionaryManager = Services.GetRequiredService<DictionaryManager>();
             var hotkeyManager = Services.GetRequiredService<HotkeyManager>();
             var historyManager = Services.GetRequiredService<HistoryManager>();
+            var profileManager = Services.GetRequiredService<ProfileManager>();
             var engineProvider = Services.GetRequiredService<ITtsEngineProvider>();
             var overlayHelper = Services.GetRequiredService<IWindowOverlayHelper>();
 
@@ -71,7 +72,8 @@ public partial class App : Application
                 hotkeyManager,
                 historyManager,
                 engineProvider,
-                overlayHelper);
+                overlayHelper,
+                profileManager);
             var speechPipeline = Services.GetRequiredService<ISpeechPipeline>();
             var shortcutManager = Services.GetRequiredService<GlobalShortcutManager>();
 

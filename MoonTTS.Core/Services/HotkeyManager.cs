@@ -46,7 +46,7 @@ public class HotkeyManager
         _repo = repo;
 
         /* Sets the correct paths */
-        _hotkeysBaseDir = Path.Combine(PathResolver.GetConfigDirectory(), "audio", "hotkeys");
+        _hotkeysBaseDir = Path.Combine(PathResolver.GetConfigDirectory(), "audio", "profiles");
 
         /* pass through the repo for updating UI */
         _repo.HotkeysChanged += () => OnHotkeysChanged?.Invoke();
