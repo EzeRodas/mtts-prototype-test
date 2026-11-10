@@ -57,7 +57,7 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 
 
 [Code]
-{ Adds {app} to the per-user PATH so the mtts CLI resolves from any terminal; idempotent }
+{ Adds app to the per-user PATH so the mtts CLI resolves from any terminal; idempotent }
 function PathContains(const Dir: string): Boolean;
 var
   Paths: string;
