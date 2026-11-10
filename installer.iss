@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.0"
+  #define MyAppVersion "0.1.0"
 #endif
 
 #define MyAppName "Moon-TTS"
@@ -26,6 +26,7 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+ChangesEnvironment=yes
 
 [Components]
 Name: "core"; Description: "Moon-TTS Application & CLI"; Types: full compact custom; Flags: fixed
@@ -53,3 +54,54 @@ Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: st
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+
+
+[Code]
+{ Adds {app} to the per-user PATH so the mtts CLI resolves from any terminal; idempotent }
+function PathContains(const Dir: string): Boolean;
+var
+  Paths: string;
+begin
+  if not RegQueryStringValue(HKCU, 'Environment', 'Path', Paths) then
+    Paths := '';
+  Result := Pos(';' + Lowercase(Dir) + ';', ';' + Lowercase(Paths) + ';') > 0;
+end;
+
+procedure AddToPath(const Dir: string);
+var
+  Paths: string;
+begin
+  if PathContains(Dir) then Exit;
+  if not RegQueryStringValue(HKCU, 'Environment', 'Path', Paths) then
+    Paths := '';
+  if (Paths <> '') and (Copy(Paths, Length(Paths), 1) <> ';') then
+    Paths := Paths + ';';
+  RegWriteExpandStringValue(HKCU, 'Environment', 'Path', Paths + Dir);
+end;
+
+procedure RemoveFromPath(const Dir: string);
+var
+  Paths, Wrapped, Needle: string;
+  P: Integer;
+begin
+  if not RegQueryStringValue(HKCU, 'Environment', 'Path', Paths) then Exit;
+  Wrapped := ';' + Paths + ';';
+  Needle := ';' + Dir + ';';
+  P := Pos(Lowercase(Needle), Lowercase(Wrapped));
+  if P = 0 then Exit;
+  Delete(Wrapped, P, Length(Needle) - 1);
+  Paths := Copy(Wrapped, 2, Length(Wrapped) - 2);
+  RegWriteExpandStringValue(HKCU, 'Environment', 'Path', Paths);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    AddToPath(ExpandConstant('{app}'));
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+    RemoveFromPath(ExpandConstant('{app}'));
+end;

@@ -30,4 +30,18 @@
     <None Include="..\Mbrola\espeak-ng-data\**\*" Link="espeak-ng-data\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <Target Name="EnsureNativeEspeakAssets" BeforeTargets="BeforeBuild;AssignTargetPaths"
+          Condition="($([MSBuild]::IsOSPlatform('Windows')) And (!Exists('$(MSBuildProjectDirectory)\..\Mbrola\runtimes\win-x64\native\libespeak-ng.dll') Or !Exists('$(MSBuildProjectDirectory)\..\Mbrola\espeak-ng-data\phontab'))) Or (!$([MSBuild]::IsOSPlatform('Windows')) And !Exists('$(MSBuildProjectDirectory)\..\Mbrola\espeak-ng-data\phontab'))">
+    <Exec Condition="$([MSBuild]::IsOSPlatform('Windows'))"
+          Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\Mbrola\build-native.ps1&quot;" />
+    <Exec Condition="!$([MSBuild]::IsOSPlatform('Windows'))"
+          Command="bash &quot;$(MSBuildProjectDirectory)/../Mbrola/build-native.sh&quot;" />
+    <ItemGroup>
+      <_EspeakRuntime Include="..\Mbrola\runtimes\**\native\*" />
+      <_EspeakData Include="..\Mbrola\espeak-ng-data\**\*" />
+      <None Include="@(_EspeakRuntime)" Link="runtimes\%(_EspeakRuntime.RecursiveDir)%(_EspeakRuntime.Filename)%(_EspeakRuntime.Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+      <None Include="@(_EspeakData)" Link="espeak-ng-data\%(_EspeakData.RecursiveDir)%(_EspeakData.Filename)%(_EspeakData.Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+
 </Project>

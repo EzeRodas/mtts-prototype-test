@@ -204,10 +204,10 @@ public class WindowsShortcutHook : IGlobalShortcutHook
         [DllImport("user32.dll")]
         public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
-        [DllImport("user32.dll")]
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         public static extern int GetMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
         
-        [DllImport("user32.dll")]
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         public static extern bool PeekMessage(
             out MSG lpMsg, 
             IntPtr hWnd, 
@@ -216,10 +216,11 @@ public class WindowsShortcutHook : IGlobalShortcutHook
             uint wRemoveMsg
             );
         
-        [DllImport("user32.dll")]
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         public static extern bool PostThreadMessage(int idThread, uint Msg, IntPtr wParam, IntPtr lParam);
         
-        [DllImport("user32.dll")]
+        /* Exported by kernel32.dll, not user32.dll */
+        [DllImport("kernel32.dll")]
         public static extern int GetCurrentThreadId();
 
         [StructLayout(LayoutKind.Sequential)]

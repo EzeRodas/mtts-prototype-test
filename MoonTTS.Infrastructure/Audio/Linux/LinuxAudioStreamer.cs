@@ -1,4 +1,3 @@
-#if !WINDOWS
 using System.Diagnostics;
 using MoonTTS.Domain.Audio;
 using MoonTTS.Domain.Common;
@@ -84,4 +83,3 @@ public static class LinuxAudioStreamer
         }
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if !WINDOWS
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using MoonTTS.Domain.Audio;
@@ -148,4 +147,3 @@ public class LinuxProcessRunner
         }
     }
 }
-#endif

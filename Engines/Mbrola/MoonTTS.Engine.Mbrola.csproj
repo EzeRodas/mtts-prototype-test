@@ -26,4 +26,17 @@
     <None Include="espeak-ng-data\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <Target Name="EnsureNativeEspeakAssets" BeforeTargets="BeforeBuild;AssignTargetPaths">
+    <Exec Condition="$([MSBuild]::IsOSPlatform('Windows')) And (!Exists('$(MSBuildProjectDirectory)\runtimes\win-x64\native\libespeak-ng.dll') Or !Exists('$(MSBuildProjectDirectory)\espeak-ng-data\phontab'))"
+          Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\build-native.ps1&quot;" />
+    <Exec Condition="!$([MSBuild]::IsOSPlatform('Windows')) And !Exists('$(MSBuildProjectDirectory)\espeak-ng-data\phontab')"
+          Command="bash &quot;$(MSBuildProjectDirectory)/build-native.sh&quot;" />
+    <ItemGroup>
+      <None Remove="runtimes\**\native\*" />
+      <None Remove="espeak-ng-data\**\*" />
+      <None Include="runtimes\**\native\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+      <None Include="espeak-ng-data\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+
 </Project>

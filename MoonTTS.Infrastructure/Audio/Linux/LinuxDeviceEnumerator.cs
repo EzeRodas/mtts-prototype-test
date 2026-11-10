@@ -1,4 +1,3 @@
-#if !WINDOWS
 using System.Text.RegularExpressions;
 
 namespace MoonTTS.Infrastructure.Audio.Linux;
@@ -84,4 +83,3 @@ public class LinuxDeviceEnumerator
     }
     
 }
-#endif

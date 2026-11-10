@@ -352,6 +352,7 @@ public class WindowService : IWindowService
         /* Links settings to the HUD before showing so both stay in the same overlay layer */
         _overlayHelper.LinkChildOverlayWindow(GetHandle(_settingsWindow), GetHandle(_mainWindow), alwaysOnTop);
         _settingsWindow.Show();
+        _overlayHelper.LinkChildOverlayWindow(GetHandle(_settingsWindow), GetHandle(_mainWindow), alwaysOnTop);
         _overlayHelper.ConfigureOverlayWindow(GetHandle(_settingsWindow), alwaysOnTop);
         _settingsWindow.Activate();
     }

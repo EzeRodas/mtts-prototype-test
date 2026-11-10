@@ -1,4 +1,3 @@
-#if !WINDOWS
 using System.Diagnostics;
 using MoonTTS.Core.Utilities;
 using MoonTTS.Domain.Audio;
@@ -250,4 +249,3 @@ public class LinuxAudioPlayer : IAudioPlayer
         }
     }
 }
-#endif

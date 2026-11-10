@@ -1,4 +1,3 @@
-#if !WINDOWS
 using MoonTTS.Domain.Common;
 
 namespace MoonTTS.Infrastructure.Audio.Linux;
@@ -53,4 +52,3 @@ public class LinuxVirtualMicService
             : Result.Failure($"Failed to create virtual sink via pactl and pw-cli: {pwRes.ErrorMessage}");
     }
 }
-#endif

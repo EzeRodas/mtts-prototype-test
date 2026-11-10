@@ -1,4 +1,3 @@
-#if !WINDOWS
 using System.Runtime.InteropServices;
 using MoonTTS.Core.Utilities;
 using MoonTTS.Domain.Audio;
@@ -462,4 +461,3 @@ public class MacAudioPlayer : IAudioPlayer
         return found?.Uid ?? deviceId;
     }
 }
-#endif

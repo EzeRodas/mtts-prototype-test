@@ -16,6 +16,7 @@ namespace MoonTTS.Avalonia.ViewModels;
         - AdvancedTab (Enum)
         - ModelStatusItem (Class)
         - SettingsViewModel(SettingsManager, IAudioPlayer, IWindowService, DownloadManager, DictionaryManager?, HotkeyManager?, HistoryManager?, TtsEngineProvider?)
+        - IsLinux : bool
         - LoadAudioDevices() : void
         - LoadTtsEngines() : void
         - UpdateAvailableModelDownloadState(ModelId, bool) : void
@@ -278,6 +279,9 @@ public partial class SettingsViewModel : ViewModelBase
             : (string.IsNullOrWhiteSpace(NewHotkeyKey) ? "Record shortcut..." : NewHotkeyKey);
 
     public string ToggleRecordButtonText => IsRecordingToggleHotkey ? "Cancel" : "Change";
+
+    /* True only on Linux, where PulseAudio / PipeWire null-sink virtual microphones can be created */
+    public bool IsLinux => OperatingSystem.IsLinux();
 
     /* Populates audio outputs from platform sink enumerator */
     private void LoadAudioDevices()

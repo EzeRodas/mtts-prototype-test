@@ -295,7 +295,7 @@
                                 <CheckBox Content="Hide HUD automatically when speech begins" IsChecked="{Binding HideOnSynth}"/>
                                 <CheckBox Content="Remember HUD window coordinates on screen" IsChecked="{Binding RememberPosition}"/>
                                 <CheckBox Content="Start minimized to system tray" IsChecked="{Binding OpenOnStartup}"/>
-                                <CheckBox Content="Create Linux Virtual Microphone null-sink on startup" IsChecked="{Binding CreateMicOnStartup}"/>
+                                <CheckBox Content="Create Linux Virtual Microphone null-sink on startup" IsChecked="{Binding CreateMicOnStartup}" IsVisible="{Binding IsLinux}"/>
                             </StackPanel>
 
                             <!-- Audio Tab -->

@@ -4,6 +4,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
+using Avalonia.Threading;
 using MoonTTS.Avalonia.ViewModels;
 using MoonTTS.Domain.ValueObjects;
 
@@ -73,16 +74,30 @@ public partial class SettingsWindow : Window
         RepositionWindow(isAdvanced: false);
     }
 
-    /* Automatically hides and resets to Quick Settings when clicking outside */
+    /* Automatically hides and resets to Quick Settings when clicking outside. The hide is deferred until the pending
+       activation of the clicked window has finished: hiding the active window in the middle of its deactivation makes
+       Windows pick an unrelated application behind the HUD to activate, which stole focus from the HUD controls */
     private void OnWindowDeactivated(object? sender, EventArgs e)
     {
         if (DataContext is SettingsViewModel vm)
         {
             vm.CancelRecording();
         }
-        ResetToQuickView();
         LastDeactivatedTick = Environment.TickCount64;
-        Hide();
+
+        bool keepMainFocused = _mainWindow != null && (_mainWindow.IsActive || _mainWindow.IsPointerOver);
+        Dispatcher.UIThread.Post(() =>
+        {
+            /* The settings window was re-activated before the deferred hide ran */
+            if (IsActive)
+                return;
+
+            ResetToQuickView();
+            Hide();
+
+            if (keepMainFocused && _mainWindow is { IsVisible: true })
+                _mainWindow.Activate();
+        }, DispatcherPriority.Input);
     }
 
     /* Intercepts key presses during hotkey recording before any child controls process them */

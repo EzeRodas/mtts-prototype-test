@@ -103,11 +103,14 @@ class Program
         root.Add(outputBranch);
         
         /* Mic branch (ONLY LINUX) */
-        var micBranch = new Command("mic", "Create or check status of the virtual microphone. (ONLY LINUX)");
-        micBranch.Add(VirtualMicCreateCommand.Build(sp));
-        micBranch.Add(VirtualMicStatusCommand.Build(sp));
+        if (OperatingSystem.IsLinux())
+        {
+            var micBranch = new Command("mic", "Create or check status of the virtual microphone. (ONLY LINUX)");
+            micBranch.Add(VirtualMicCreateCommand.Build(sp));
+            micBranch.Add(VirtualMicStatusCommand.Build(sp));
 
-        root.Add(micBranch);
+            root.Add(micBranch);
+        }
         
         /* Daemon branch */
         var daemonBranch = new Command("daemon", "Manages the background TTS model daemon.");

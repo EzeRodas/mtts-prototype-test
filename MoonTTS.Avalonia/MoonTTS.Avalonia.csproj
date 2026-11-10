@@ -4,6 +4,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Embeds the Win32 icon resource so Explorer, Start Menu and Desktop shortcuts show it -->
+    <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
     <IsAotCompatible>true</IsAotCompatible>
     <!-- Configures unmanaged COM interop stubs required by Avalonia on Windows under Native AOT -->
     <BuiltInComInteropSupport>true</BuiltInComInteropSupport>

@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.Marshalling;
 using MoonTTS.Domain.Interfaces;
 
 namespace MoonTTS.Infrastructure.OS.Windows;
@@ -13,7 +12,7 @@ namespace MoonTTS.Infrastructure.OS.Windows;
         - OnAfterHide(nint mainWindowHandle) : void
         - IsFullscreenApplication(nint window) : bool
         - MarkFullscreen(nint window, bool fullscreen) : void
-        - GetTaskbarList() : ITaskbarList2?
+        - GetTaskbarList() : nint
         - LibWin32
 */
 
@@ -32,7 +31,7 @@ public sealed class WindowsWindowOverlayHelper : IWindowOverlayHelper
     /* True when the window that was active before the HUD appeared is a fullscreen / borderless application */
     private bool _overlayingFullscreen;
 
-    private ITaskbarList2? _taskbarList;
+    private nint _taskbarList;
     private bool _taskbarListFailed;
 
     /* Makes the window a tool window (no taskbar button, no Alt+Tab entry) and mirrors the topmost state */
@@ -71,11 +70,17 @@ public sealed class WindowsWindowOverlayHelper : IWindowOverlayHelper
         MarkFullscreen(mainWindowHandle, _overlayingFullscreen);
     }
 
-    /* Applies the same fullscreen marking to a secondary window, so focusing it does not raise the taskbar either */
+    /* Makes the owner window the Win32 owner of the secondary window, so the OS keeps the pair together and activates the
+       owner (instead of an unrelated application behind the HUD) when the secondary window hides, and applies the same
+       fullscreen marking so focusing it does not raise the taskbar either */
     public void LinkChildOverlayWindow(nint childWindowHandle, nint ownerWindowHandle, bool alwaysOnTop)
     {
         if (childWindowHandle == 0) return;
         _linkedChildWindow = childWindowHandle;
+
+        if (ownerWindowHandle != 0)
+            LibWin32.SetWindowLongPtrW(childWindowHandle, LibWin32.GWLP_HWNDPARENT, ownerWindowHandle);
+
         MarkFullscreen(childWindowHandle, _overlayingFullscreen);
     }
 
@@ -146,14 +151,18 @@ public sealed class WindowsWindowOverlayHelper : IWindowOverlayHelper
     }
 
     /* Tells the shell whether a window should be treated as fullscreen (taskbar stays behind it) */
-    private void MarkFullscreen(nint window, bool fullscreen)
+    private unsafe void MarkFullscreen(nint window, bool fullscreen)
     {
-        ITaskbarList2? taskbarList = GetTaskbarList();
-        if (taskbarList == null) return;
+        nint taskbarList = GetTaskbarList();
+        if (taskbarList == 0) return;
 
         try
         {
-            taskbarList.MarkFullscreenWindow(window, fullscreen);
+            nint* vtable = *(nint**)taskbarList;
+            var markFullscreenWindow = (delegate* unmanaged[Stdcall]<nint, nint, int, int>)vtable[LibWin32.VtblMarkFullscreenWindow];
+            int hr = markFullscreenWindow(taskbarList, window, fullscreen ? 1 : 0);
+            if (hr < 0)
+                Console.Error.WriteLine($"[WindowsWindowOverlayHelper] MarkFullscreenWindow failed with HRESULT 0x{hr:X8}");
         }
         catch (Exception ex)
         {
@@ -161,10 +170,12 @@ public sealed class WindowsWindowOverlayHelper : IWindowOverlayHelper
         }
     }
 
-    /* Lazily creates the shell's taskbar COM object, giving up for good if the shell refuses */
-    private ITaskbarList2? GetTaskbarList()
+    /* Lazily creates the shell's ITaskbarList2 COM object and returns its raw interface pointer, giving up for good
+       (returning 0) if the shell refuses. The pointer is invoked through its vtable, which needs no COM wrapper
+       generation and therefore works under Native AOT */
+    private unsafe nint GetTaskbarList()
     {
-        if (_taskbarList != null || _taskbarListFailed)
+        if (_taskbarList != 0 || _taskbarListFailed)
             return _taskbarList;
 
         try
@@ -174,15 +185,25 @@ public sealed class WindowsWindowOverlayHelper : IWindowOverlayHelper
             int hr = LibWin32.CoCreateInstance(ref clsid, 0, LibWin32.CLSCTX_INPROC_SERVER, ref iid, out nint instance);
             if (hr < 0 || instance == 0)
             {
+                Console.Error.WriteLine($"[WindowsWindowOverlayHelper] CoCreateInstance(TaskbarList) failed with HRESULT 0x{hr:X8}");
                 _taskbarListFailed = true;
-                return null;
+                return 0;
+            }
+
+            nint* vtable = *(nint**)instance;
+            var hrInit = (delegate* unmanaged[Stdcall]<nint, int>)vtable[LibWin32.VtblHrInit];
+            hr = hrInit(instance);
+            if (hr < 0)
+            {
+                var release = (delegate* unmanaged[Stdcall]<nint, uint>)vtable[LibWin32.VtblRelease];
+                release(instance);
+                Console.Error.WriteLine($"[WindowsWindowOverlayHelper] ITaskbarList.HrInit failed with HRESULT 0x{hr:X8}");
+                _taskbarListFailed = true;
+                return 0;
             }
 
             /* The helper lives as long as the process, so the reference created by CoCreateInstance is kept on purpose */
-            var wrappers = new StrategyBasedComWrappers();
-            var taskbarList = (ITaskbarList2)wrappers.GetOrCreateObjectForComInstance(instance, CreateObjectFlags.UniqueInstance);
-            taskbarList.HrInit();
-            _taskbarList = taskbarList;
+            _taskbarList = instance;
         }
         catch (Exception ex)
         {
@@ -199,8 +220,14 @@ public sealed class WindowsWindowOverlayHelper : IWindowOverlayHelper
     private static class LibWin32
     {
         public const int GWL_EXSTYLE = -20;
+        public const int GWLP_HWNDPARENT = -8; /* Sets the owner (not the parent) of a top-level window */
         public const int WS_EX_TOOLWINDOW = 0x00000080;
         public const int WS_EX_APPWINDOW = 0x00040000;
+
+        /* Slots of the ITaskbarList2 vtable: IUnknown (0-2), ITaskbarList (3-7), ITaskbarList2 (8) */
+        public const int VtblRelease = 2;
+        public const int VtblHrInit = 3;
+        public const int VtblMarkFullscreenWindow = 8;
 
         public static readonly nint HWND_TOPMOST = -1;
         public static readonly nint HWND_NOTOPMOST = -2;

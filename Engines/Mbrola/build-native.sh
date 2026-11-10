@@ -232,7 +232,7 @@ if [ "$IS_WINDOWS" -eq 1 ]; then
         -o "$NATIVE_OUT/libespeak-ng.dll" \
         -Wl,--whole-archive "$ESPEAK_A" "$WORK_DIR/libmbr.a" -Wl,--no-whole-archive \
         -Wl,--export-all-symbols \
-        -static-libgcc \
+        -static -static-libgcc \
         -lm -ladvapi32
     strip --strip-unneeded "$NATIVE_OUT/libespeak-ng.dll"
     NATIVE_LIB_PATH="$NATIVE_OUT/libespeak-ng.dll"

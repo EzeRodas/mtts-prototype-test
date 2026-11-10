@@ -1,4 +1,3 @@
-#if !WINDOWS
 using System.Runtime.InteropServices;
 
 namespace MoonTTS.Infrastructure.Audio;
@@ -197,4 +196,3 @@ internal static class MacCoreAudioApi
         return CFStringCreateWithCharacters(IntPtr.Zero, str, str.Length);
     }
 }
-#endif
