@@ -28,4 +28,9 @@
     <None Include="engine.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- Removes unexposed voices-zh speaker embeddings (~51.5 MB) from both build and publish output directories -->
+  <Target Name="PruneUnusedKokoroVoices" AfterTargets="CopyContent;CopyVoicesToPublish">
+    <RemoveDir Directories="$(TargetDir)voices\voices-zh;$(PublishDir)voices\voices-zh" />
+  </Target>
+
 </Project>

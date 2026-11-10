@@ -1,10 +1,10 @@
 <Project>
     <Target Name="CopyVoicesToPublish" AfterTargets="Publish" Condition="'$(OutputType)' != 'Library'">
         <ItemGroup>
-            <VoiceFiles Include="$(TargetDir)voices\**\*" />
+            <VoiceFiles Include="$(TargetDir)voices\*.npy" />
         </ItemGroup>
         <Copy SourceFiles="@(VoiceFiles)"
-              DestinationFolder="$(PublishDir)voices\%(RecursiveDir)"
+              DestinationFolder="$(PublishDir)voices"
               SkipUnchangedFiles="true"
               Condition="Exists('$(TargetDir)voices')"/>
     </Target>

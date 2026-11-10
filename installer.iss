@@ -40,12 +40,12 @@ Name: "startupicon"; Description: "Start {#MyAppName} automatically when Windows
 
 [Files]
 ; Main GUI (MoonTTS.Avalonia.exe), CLI (mtts.exe), and runtime DLLs
-Source: "dist\app\*"; DestDir: "{app}"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\app\*"; DestDir: "{app}"; Components: core; Excludes: "*.pdb,*.dbg,*.xml"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; Engine workers installed to %APPDATA%\Moon-TTS\engines
-Source: "dist\engines\Kokoro\*"; DestDir: "{userappdata}\Moon-TTS\engines\Kokoro"; Components: engines\kokoro; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "dist\engines\Kitten\*"; DestDir: "{userappdata}\Moon-TTS\engines\Kitten"; Components: engines\kitten; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "dist\engines\Mbrola\*"; DestDir: "{userappdata}\Moon-TTS\engines\Mbrola"; Components: engines\mbrola; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\engines\Kokoro\*"; DestDir: "{userappdata}\Moon-TTS\engines\Kokoro"; Components: engines\kokoro; Excludes: "*.pdb,*.dbg,*.xml"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\engines\Kitten\*"; DestDir: "{userappdata}\Moon-TTS\engines\Kitten"; Components: engines\kitten; Excludes: "*.pdb,*.dbg,*.xml"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\engines\Mbrola\*"; DestDir: "{userappdata}\Moon-TTS\engines\Mbrola"; Components: engines\mbrola; Excludes: "*.pdb,*.dbg,*.xml"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

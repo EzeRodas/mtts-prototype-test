@@ -99,9 +99,9 @@ flowchart TD
 ## 3. Complete File Tree & File Responsibilities
 
 ### 3.1 Solution Root
-* **Directory.Build.targets**: Central MSBuild properties and build targets across all solution projects.
+* **Directory.Build.targets**: Central MSBuild properties and build targets across all solution projects (copies only top-level `.npy` voice files to publish directories).
 * **MoonTTS.slnx**: Solution definition linking Domain, Core, Infrastructure, Engine.Protocol, Avalonia, and CLI.
-* **installer.iss**: Inno Setup installer script for Windows (`win-x64`), packaging the Native AOT GUI, CLI, and the `Kokoro`, `Kitten`, and `Mbrola` engine workers.
+* **installer.iss**: Inno Setup installer script for Windows (`win-x64`), packaging the Native AOT GUI, CLI, and the `Kokoro`, `Kitten`, and `Mbrola` engine workers (excluding `.pdb`, `.dbg`, and `.xml` debug symbol artifacts).
 * **.github/workflows/release-windows.yml**: GitHub Actions workflow that builds `libespeak-ng.dll` + `espeak-ng-data` via MSYS2 UCRT64, publishes Native AOT `win-x64` binaries for the GUI, CLI, and all three engines, compiles `installer.iss` with Inno Setup, and attaches the resulting `.exe` installer to workflow artifacts and GitHub Releases.
 * **MoonTTS.Engine.Protocol/**: Public engine IPC contract shared by the host and C# engine workers (see 3.7).
 * **Engines/**: Source of out-of-process engine workers. They are not part of `MoonTTS.slnx`; each is published into the user's engines folder (see 3.8).
@@ -289,7 +289,7 @@ The public, dependency-free contract between the host and engine workers. Worker
 
 ### 3.8 Engine Workers (`Engines/`)
 Standalone executables that are never linked into the host. Each is published into the engines folder.
-* **Engines/Kokoro/MoonTTS.Engine.Kokoro.csproj**: Kokoro ONNX worker (`kokoro-worker`, Native AOT) referencing `KokoroSharp`, `Microsoft.ML.OnnxRuntime` and **MoonTTS.Engine.Protocol**. Install with `dotnet publish Engines/Kokoro -o ~/.local/share/Moon-TTS/engines/Kokoro`.
+* **Engines/Kokoro/MoonTTS.Engine.Kokoro.csproj**: Kokoro ONNX worker (`kokoro-worker`, Native AOT) referencing `KokoroSharp`, `Microsoft.ML.OnnxRuntime` and **MoonTTS.Engine.Protocol**, and pruning unexposed `voices-zh` speaker embeddings via `PruneUnusedKokoroVoices`. Install with `dotnet publish Engines/Kokoro -o ~/.local/share/Moon-TTS/engines/Kokoro`.
 * **Engines/Kokoro/engine.json**: Manifest declaring the `kokoro` engine and its `kokoro-v1.0`, `kokoro-v1.0-fp16` and `kokoro-v1.1-zh-fp16` models with their download URLs.
 * **Engines/Kokoro/Program.cs**: Worker entrypoint; redirects console output to stderr and runs the frame loop until `Shutdown` or end of stdin.
 * **Engines/Kokoro/KokoroWorker.cs**: Protocol handler: metadata (24 kHz mono 16-bit), model loading, background synthesis with cancellation, and in-place de-clicking of each rendered sentence.
