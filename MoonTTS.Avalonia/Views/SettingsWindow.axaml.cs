@@ -5,6 +5,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using MoonTTS.Avalonia.ViewModels;
 using MoonTTS.Domain.ValueObjects;
 
@@ -18,6 +19,7 @@ namespace MoonTTS.Avalonia.Views;
             - SetOwnerWindow(MainWindow) : void
             - ResetToQuickView() : void
             - OnWindowDeactivated(object?, EventArgs) : void
+            - OnModelRowPointerPressed(object?, PointerPressedEventArgs) : void
             - OnWindowPreviewKeyDown(object?, KeyEventArgs) : void
             - IsPureModifierKey(Key) : bool
             - ConvertKeyToStandardString(Key) : string?
@@ -98,6 +100,22 @@ public partial class SettingsWindow : Window
             if (keepMainFocused && _mainWindow is { IsVisible: true })
                 _mainWindow.Activate();
         }, DispatcherPriority.Input);
+    }
+
+    /* Intercepts clicks on uninstalled models in the dropdown before ComboBoxItem selects them,
+       closing the dropdown and redirecting to the Engine Management tab instead */
+    private void OnModelRowPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (sender is not Control { DataContext: ModelMetadata { IsUnavailable: true } } row)
+            return;
+
+        e.Handled = true;
+
+        if (row.FindAncestorOfType<ComboBox>() is { } comboBox)
+            comboBox.IsDropDownOpen = false;
+
+        if (DataContext is SettingsViewModel vm)
+            vm.NavigateToEngineManagementCommand.Execute(null);
     }
 
     /* Intercepts key presses during hotkey recording before any child controls process them */

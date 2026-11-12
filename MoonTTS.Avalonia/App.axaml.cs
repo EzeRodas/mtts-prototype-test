@@ -77,7 +77,7 @@ public partial class App : Application
             var speechPipeline = Services.GetRequiredService<ISpeechPipeline>();
             var shortcutManager = Services.GetRequiredService<GlobalShortcutManager>();
 
-            var mainViewModel = new MainViewModel(speechPipeline, windowService, hotkeyManager);
+            var mainViewModel = new MainViewModel(speechPipeline, windowService, hotkeyManager, historyManager);
 
             /* Sets the datacontext on the window and application */
             mainWindow.DataContext = mainViewModel;

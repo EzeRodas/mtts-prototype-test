@@ -28,7 +28,7 @@ namespace MoonTTS.Avalonia.ViewModels;
         - LoadModelStatuses() : void
         - ShowModelStatusAsync(string message) : void
         - SwitchModelAsync(ModelMetadata model) : Task
-        - RevertModelSelectionAsync() : Task
+        - RevertModelSelectionAsync(bool navigateToEngineManagement) : Task
         - AutoSave() : void
         - SwitchToAdvanced() : void
         - SwitchToQuick() : void
@@ -95,7 +95,20 @@ public partial class ModelStatusItem : ObservableObject
     [ObservableProperty]
     private bool _isCpuHigh;
 
-    public bool HasTags => !string.IsNullOrEmpty(SizeTag) || !string.IsNullOrEmpty(RamUsageTag) || !string.IsNullOrEmpty(CpuUsageTag);
+    [ObservableProperty]
+    private string? _languageTag;
+
+    [ObservableProperty]
+    private string? _languagesPopupText;
+
+    [ObservableProperty]
+    private bool _hasMultipleLanguages;
+
+    public bool HasTags =>
+        !string.IsNullOrEmpty(SizeTag)
+        || !string.IsNullOrEmpty(RamUsageTag)
+        || !string.IsNullOrEmpty(CpuUsageTag)
+        || !string.IsNullOrEmpty(LanguageTag);
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(CanDownload))]
@@ -434,6 +447,28 @@ public partial class SettingsViewModel : ViewModelBase
             foreach (var model in engine.Models)
             {
                 string? cpu = model.CpuUsage?.Trim().ToLowerInvariant();
+                var sortedLanguages = model.Languages?
+                    .Where(l => !string.IsNullOrWhiteSpace(l))
+                    .Select(l => l.Trim())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(l => l, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                string? languageTag = null;
+                string? languagesPopupText = null;
+                bool hasMultipleLanguages = false;
+
+                if (sortedLanguages is { Count: 1 })
+                {
+                    languageTag = $"Language: {sortedLanguages[0]}";
+                }
+                else if (sortedLanguages is { Count: > 1 })
+                {
+                    languageTag = $"Languages: {sortedLanguages.Count}";
+                    languagesPopupText = string.Join(", ", sortedLanguages);
+                    hasMultipleLanguages = true;
+                }
+
                 ModelStatuses.Add(
                     new ModelStatusItem
                     {
@@ -447,7 +482,10 @@ public partial class SettingsViewModel : ViewModelBase
                         CpuUsageTag = !string.IsNullOrEmpty(model.CpuUsage) ? $"CPU usage: {model.CpuUsage}" : null,
                         IsCpuLow = cpu == "low",
                         IsCpuMedium = cpu == "medium",
-                        IsCpuHigh = cpu == "high"
+                        IsCpuHigh = cpu == "high",
+                        LanguageTag = languageTag,
+                        LanguagesPopupText = languagesPopupText,
+                        HasMultipleLanguages = hasMultipleLanguages
                     }
                 );
             }
@@ -556,11 +594,11 @@ public partial class SettingsViewModel : ViewModelBase
             return;
 
         /* Every installed engine's models are listed, but only downloaded ones can be activated.
+           Clicking an uninstalled one reverts the selection and opens Engine Management so it can be downloaded.
            Unselected has no files and is always allowed */
         if (!value.IsUnselected && _downloadManager != null && !_downloadManager.IsModelDownloaded(value.Id))
         {
-            _ = RevertModelSelectionAsync();
-            ShowModelStatusAsync(ModelNotInstalledMessage);
+            _ = RevertModelSelectionAsync(navigateToEngineManagement: true);
             return;
         }
 
@@ -628,7 +666,7 @@ public partial class SettingsViewModel : ViewModelBase
 
     /* Restores the dropdown to the saved active model without saving. Yields first so the ComboBox finishes
        applying the user's selection before it is replaced */
-    private async Task RevertModelSelectionAsync()
+    private async Task RevertModelSelectionAsync(bool navigateToEngineManagement = false)
     {
         await Task.Yield();
 
@@ -636,12 +674,16 @@ public partial class SettingsViewModel : ViewModelBase
         _isLoading = true;
         try
         {
+            SelectedModel = null;
             SelectedModel = AvailableModels.FirstOrDefault(m => m.Id == activeModel) ?? ModelMetadata.Unselected;
         }
         finally
         {
             _isLoading = false;
         }
+
+        if (navigateToEngineManagement)
+            NavigateToEngineManagement();
     }
 
     partial void OnSelectedVoiceChanged(VoiceInfo? value)

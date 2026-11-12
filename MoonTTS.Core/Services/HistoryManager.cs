@@ -5,13 +5,15 @@ using MoonTTS.Domain.Common;
 using MoonTTS.Domain.Constants;
 using MoonTTS.Domain.Entities;
 using MoonTTS.Domain.Interfaces;
+using MoonTTS.Domain.ValueObjects;
 
 namespace MoonTTS.Core.Services;
 
 /* File Structure:
         - HistoryManager(IAudioPlayer audioPlayer, IConfigurationRepository repo)
         - GetHistory() : IReadOnlyList<HistoryEntry>
-        - AddEntry(string text, byte[] wavData) : Task<Result>
+        - FindMatchingEntry(string text, ModelId model, string voice) : HistoryEntry?
+        - AddEntry(string text, byte[] wavData, ModelId model, string voice) : Task<Result>
         - PlayEntryAsync(Guid id, CancellationToken cancellationToken) : Task<Result>
         - Pause() : void
         - Resume() : void
@@ -23,9 +25,6 @@ namespace MoonTTS.Core.Services;
 
 public class HistoryManager
 {
-    /* (Might make the history limit a setting in the future, idk) */
-    private const int MaxTextLenght = 50;
-
     private readonly IConfigurationRepository _repo;
     private readonly IAudioPlayer _audioPlayer;
     private readonly string _historyDirectory;
@@ -46,12 +45,23 @@ public class HistoryManager
     /* Returns a copy of the current speech history entries */
     public IReadOnlyList<HistoryEntry> GetHistory() => _repo.HistoryEntries.ToList();
 
-    public async Task<Result> AddEntry(string text, byte[] wavData)
+    /* Returns the most recent entry generated from exactly this text, model and voice whose audio file still
+       exists, or null. Unselected models and empty voices never match */
+    public HistoryEntry? FindMatchingEntry(string text, ModelId model, string voice)
     {
-        /* If the text is longer than the max lenght it gets trimmed.
-         The sole purpose of this saved text is to gie visual indication on the UI of the contents
-         of each entry, therefore the full text is irrelevant */
-        string trimmedText = text.Length > MaxTextLenght ? text.Substring(0, MaxTextLenght -3) + "..." : text;
+        if (model.IsUnselected || string.IsNullOrEmpty(voice))
+            return null;
+
+        return _repo.HistoryEntries.FirstOrDefault(h =>
+            h.Model == model
+            && h.Voice == voice
+            && string.Equals(h.Text, text, StringComparison.Ordinal)
+            && File.Exists(Path.Combine(_historyDirectory, h.WavFileName)));
+    }
+
+    /* Stores the full text with the model and voice that produced the audio, so it can be recalled and replayed */
+    public async Task<Result> AddEntry(string text, byte[] wavData, ModelId model = default, string voice = "")
+    {
         Guid newId = Guid.NewGuid();
         string fileName = $"tts_output_{newId}.wav";
         string filePath = Path.Combine(_historyDirectory, fileName);
@@ -61,9 +71,11 @@ public class HistoryManager
         HistoryEntry newEntry = new HistoryEntry
         {
             Id = newId, 
-            Text = trimmedText, 
+            Text = text, 
             CreatedAt = DateTime.Now,
-            WavFileName = fileName
+            WavFileName = fileName,
+            Model = model,
+            Voice = voice
         };
 
         /* Recovers the list and adds it at the top */

@@ -11,8 +11,12 @@ namespace MoonTTS.Avalonia.ViewModels;
 
 /* File Structure:
         - MainViewModel()
-        - MainViewModel(ISpeechPipeline?, IWindowService?, HotkeyManager)
+        - MainViewModel(ISpeechPipeline?, IWindowService?, HotkeyManager, HistoryManager?)
         - CanPlay : bool
+        - OnTextToSpeakChanged(string) : void
+        - NavigateHistoryUp() : void
+        - NavigateHistoryDown() : void
+        - ShowHistoryEntry(int) : void
         - PlayAsync() : Task
         - ShowStatusAsync(string message) : void
         - Stop() : void
@@ -24,6 +28,12 @@ public partial class MainViewModel : ViewModelBase
     private readonly ISpeechPipeline? _speechPipeline;
     private readonly IWindowService? _windowService;
     private readonly HotkeyManager _hotKeyManager;
+    private readonly HistoryManager? _historyManager;
+
+    /* Position in the history while browsing it with the arrow keys (0 is the newest entry, -1 is the typed draft) */
+    private int _historyIndex = -1;
+    private string _draftText = string.Empty;
+    private bool _isNavigatingHistory;
     
     public ICommand? CloseAppCommand { get; }
     public ICommand? ShowMainWindowCommand { get; }
@@ -48,8 +58,13 @@ public partial class MainViewModel : ViewModelBase
     public MainViewModel(
         ISpeechPipeline? speechPipeline, 
         IWindowService? windowService, 
-        HotkeyManager hotKeyManager)
+        HotkeyManager hotKeyManager,
+        HistoryManager? historyManager = null)
     {
+        _historyManager = historyManager;
+        if (_historyManager != null)
+            _historyManager.OnHistoryChanged += () => _historyIndex = -1;
+
         _speechPipeline = speechPipeline;
         _windowService = windowService;
         _hotKeyManager = hotKeyManager;
@@ -65,6 +80,57 @@ public partial class MainViewModel : ViewModelBase
             
             /* Settings menu */
             ToggleSettingsCommand = new RelayCommand(_windowService.ToggleSettingsWindow);
+        }
+    }
+
+    /* Typing (as opposed to browsing the history) makes the current text the new draft and restarts the browsing */
+    partial void OnTextToSpeakChanged(string value)
+    {
+        if (_isNavigatingHistory)
+            return;
+
+        _draftText = value;
+        _historyIndex = -1;
+    }
+
+    /* Replaces the input text with the next older history entry, remembering the draft the first time */
+    public void NavigateHistoryUp()
+    {
+        if (_historyManager == null)
+            return;
+
+        var history = _historyManager.GetHistory();
+        if (_historyIndex + 1 >= history.Count)
+            return;
+
+        if (_historyIndex == -1)
+            _draftText = TextToSpeak;
+
+        ShowHistoryEntry(_historyIndex + 1);
+    }
+
+    /* Replaces the input text with the next newer history entry, restoring the draft after the newest one */
+    public void NavigateHistoryDown()
+    {
+        if (_historyManager == null || _historyIndex == -1)
+            return;
+
+        ShowHistoryEntry(_historyIndex - 1);
+    }
+
+    /* Shows the history entry at the index (or the draft for -1) without treating it as typed text */
+    private void ShowHistoryEntry(int index)
+    {
+        var history = _historyManager!.GetHistory();
+        _isNavigatingHistory = true;
+        try
+        {
+            _historyIndex = index;
+            TextToSpeak = index == -1 ? _draftText : history[index].Text;
+        }
+        finally
+        {
+            _isNavigatingHistory = false;
         }
     }
 

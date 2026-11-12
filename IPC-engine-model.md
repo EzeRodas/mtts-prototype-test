@@ -206,6 +206,7 @@ Every sub folder containing an `engine.json` is an engine. The folder name is fr
     {
       "id": "en_US-lessac-medium",
       "displayName": "Lessac (US English, Medium)",
+      "languages": ["English"],
       "downloadFiles": {
         "en_US-lessac-medium.onnx": "https://example.org/en_US-lessac-medium.onnx",
         "en_US-lessac-medium.onnx.json": "https://example.org/en_US-lessac-medium.onnx.json"

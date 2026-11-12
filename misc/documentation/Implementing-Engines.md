@@ -88,6 +88,7 @@ Model files are **not** stored here. Moon-TTS downloads them into `<models direc
 | `displayName` | Shown in the UI. Falls back to `id`. |
 | `executable` | Required. Path relative to the engine folder. On Windows `.exe` is appended automatically when the file without extension does not exist, so one manifest works on every OS. On Linux/macOS a script with a shebang (`#!/usr/bin/env python3`) and the executable bit works. |
 | `models[].id` | Required. Users address the model as `<engineId>/<modelId>` (e.g. `myengine/small`), or by `<modelId>` alone when it is unambiguous. |
+| `models[].languages` | Optional array of language names (e.g. `["English", "Spanish"]`) displayed on the model card in the Engine Management tab. |
 | `models[].downloadFiles` | Local file name → download URL. The keys are also the `files` list your worker receives in `LoadModel`. A model with no files (a cloud API, an OS voice, a model bundled in the engine folder) is always considered downloaded. |
 
 The manifest is parsed case-insensitively and accepts comments and trailing commas. An invalid manifest is skipped (with a message in the log) without affecting other engines.

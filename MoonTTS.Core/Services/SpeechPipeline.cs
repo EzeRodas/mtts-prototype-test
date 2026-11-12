@@ -25,7 +25,7 @@ namespace MoonTTS.Core.Services;
         - Stop() : void
 */
 
-/* Unified pipeline for all speech actions */
+/* Unified pipeline for all speech actions. Interactive speech matching a history entry replays it instead of synthesizing */
 public class SpeechPipeline : ISpeechPipeline
 {
     /* Returned by SpeakAsync when no model is selected in settings */
@@ -99,6 +99,32 @@ public class SpeechPipeline : ISpeechPipeline
 
         try
         {
+            /* Interactive speech identical to a recorded entry (text, model and voice) replays its audio
+               instead of synthesizing again, which also avoids a duplicate history entry */
+            if (options.EnablePlayback && options.RecordHistory && string.IsNullOrWhiteSpace(options.ExportPath))
+            {
+                var cached = _historyManager.FindMatchingEntry(
+                    rawText, _settingsManager.CurrentAppConfig.ActiveModel, engine.ActiveVoice);
+                if (cached != null)
+                {
+                    var replay = await _historyManager.PlayEntryAsync(cached.Id, sessionToken);
+                    if (sessionToken.IsCancellationRequested)
+                    {
+                        _audioPlayer.Stop();
+                        return Result<SpeechResult>.Failure(CancelledMessage);
+                    }
+                    if (replay.IsFailure)
+                        return Result<SpeechResult>.Failure(replay.ErrorMessage ?? "Playback failed.");
+
+                    return Result<SpeechResult>.Success(new SpeechResult
+                    {
+                        AudioDuration = TimeSpan.Zero,
+                        TimeToFirstSound = sw.Elapsed,
+                        TotalPcmBytes = 0
+                    });
+                }
+            }
+
             string processedText = options.ApplyDictionary 
                 ? _dictionaryManager.ReplaceText(rawText) 
                 : rawText;
@@ -181,7 +207,7 @@ public class SpeechPipeline : ISpeechPipeline
 
             if (options.RecordHistory && config.SaveHistory && masterWav.Length > WavWriter.HeaderSize)
             {
-                await _historyManager.AddEntry(rawText, masterWav);
+                await _historyManager.AddEntry(rawText, masterWav, config.ActiveModel, engine.ActiveVoice);
             }
 
             if (!string.IsNullOrWhiteSpace(options.ExportPath) && masterWav.Length > WavWriter.HeaderSize)

@@ -154,7 +154,7 @@
                             <ComboBox Grid.Column="1" Classes="model-selector" ItemsSource="{Binding AvailableModels}" SelectedItem="{Binding SelectedModel}" HorizontalAlignment="Stretch">
                                 <ComboBox.ItemTemplate>
                                     <DataTemplate x:DataType="valueObjects:ModelMetadata">
-                                        <Panel>
+                                        <Panel Name="ModelRow" Background="Transparent" PointerPressed="OnModelRowPointerPressed">
                                             <TextBlock Text="{Binding DisplayName}" IsVisible="{Binding !IsSeparator}"
                                                        Classes.unavailable="{Binding !IsSelectable}"/>
                                             <StackPanel IsVisible="{Binding IsSeparator}" Spacing="4" Margin="0,4,0,2">
@@ -162,6 +162,34 @@
                                                 <TextBlock Text="{Binding DisplayName}" FontSize="10" FontWeight="Bold"
                                                            Foreground="{StaticResource TextMutedBrush}"/>
                                             </StackPanel>
+                                            <!-- Info card shown under the cursor while hovering a model that is not downloaded yet -->
+                                            <Popup PlacementTarget="{Binding ElementName=ModelRow}"
+                                                   Placement="Pointer"
+                                                   HorizontalOffset="12"
+                                                   VerticalOffset="18"
+                                                   IsLightDismissEnabled="False"
+                                                   IsHitTestVisible="False">
+                                                <Popup.IsOpen>
+                                                    <MultiBinding Converter="{x:Static BoolConverters.And}">
+                                                        <Binding Path="IsPointerOver" ElementName="ModelRow"/>
+                                                        <Binding Path="IsUnavailable"/>
+                                                    </MultiBinding>
+                                                </Popup.IsOpen>
+                                                <Border Background="{StaticResource SurfaceBrush}"
+                                                        BorderBrush="{StaticResource BorderBrush}"
+                                                        BorderThickness="1"
+                                                        CornerRadius="8"
+                                                        Padding="10,8"
+                                                        MaxWidth="240">
+                                                    <Border.BoxShadow>
+                                                        <BoxShadows>0 4 12 0 #20000000</BoxShadows>
+                                                    </Border.BoxShadow>
+                                                    <TextBlock Text="To download a TTS Engine please head to the &quot;Engine Management&quot; tab on the Advanced Settings menu. Click to open it."
+                                                               Foreground="{StaticResource TextSecondaryBrush}"
+                                                               FontSize="12"
+                                                               TextWrapping="Wrap"/>
+                                                </Border>
+                                            </Popup>
                                         </Panel>
                                     </DataTemplate>
                                 </ComboBox.ItemTemplate>
@@ -409,7 +437,7 @@
                                 <ComboBox Classes="model-selector" ItemsSource="{Binding AvailableModels}" SelectedItem="{Binding SelectedModel}" HorizontalAlignment="Stretch">
                                     <ComboBox.ItemTemplate>
                                         <DataTemplate x:DataType="valueObjects:ModelMetadata">
-                                            <Panel>
+                                            <Panel Name="ModelRow" Background="Transparent" PointerPressed="OnModelRowPointerPressed">
                                                 <TextBlock Text="{Binding DisplayName}" IsVisible="{Binding !IsSeparator}"
                                                            Classes.unavailable="{Binding !IsSelectable}"/>
                                                 <StackPanel IsVisible="{Binding IsSeparator}" Spacing="4" Margin="0,4,0,2">
@@ -417,6 +445,34 @@
                                                     <TextBlock Text="{Binding DisplayName}" FontSize="10" FontWeight="Bold"
                                                                Foreground="{StaticResource TextMutedBrush}"/>
                                                 </StackPanel>
+                                            <!-- Info card shown under the cursor while hovering a model that is not downloaded yet -->
+                                            <Popup PlacementTarget="{Binding ElementName=ModelRow}"
+                                                   Placement="Pointer"
+                                                   HorizontalOffset="12"
+                                                   VerticalOffset="18"
+                                                   IsLightDismissEnabled="False"
+                                                   IsHitTestVisible="False">
+                                                <Popup.IsOpen>
+                                                    <MultiBinding Converter="{x:Static BoolConverters.And}">
+                                                        <Binding Path="IsPointerOver" ElementName="ModelRow"/>
+                                                        <Binding Path="IsUnavailable"/>
+                                                    </MultiBinding>
+                                                </Popup.IsOpen>
+                                                <Border Background="{StaticResource SurfaceBrush}"
+                                                        BorderBrush="{StaticResource BorderBrush}"
+                                                        BorderThickness="1"
+                                                        CornerRadius="8"
+                                                        Padding="10,8"
+                                                        MaxWidth="240">
+                                                    <Border.BoxShadow>
+                                                        <BoxShadows>0 4 12 0 #20000000</BoxShadows>
+                                                    </Border.BoxShadow>
+                                                    <TextBlock Text="To download a TTS Engine please head to the &quot;Engine Management&quot; tab on the Advanced Settings menu. Click to open it."
+                                                               Foreground="{StaticResource TextSecondaryBrush}"
+                                                               FontSize="12"
+                                                               TextWrapping="Wrap"/>
+                                                </Border>
+                                            </Popup>
                                             </Panel>
                                         </DataTemplate>
                                     </ComboBox.ItemTemplate>
@@ -476,6 +532,45 @@
                                                                         IsVisible="{Binding CpuUsageTag, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
                                                                     <TextBlock Text="{Binding CpuUsageTag}" Classes="model-tag-text"/>
                                                                 </Border>
+                                                                <Panel IsVisible="{Binding LanguageTag, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                                                                    <Border Name="LanguageTagBorder" Classes="model-tag">
+                                                                        <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                                                                            <TextBlock Text="{Binding LanguageTag}" Classes="model-tag-text" VerticalAlignment="Center"/>
+                                                                            <Path Data="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z M12 16v-4 M12 8h.01"
+                                                                                  Stroke="{StaticResource TextSecondaryBrush}" StrokeThickness="1.8"
+                                                                                  StrokeLineCap="Round" StrokeJoin="Round"
+                                                                                  Width="11" Height="11" Stretch="Uniform"
+                                                                                  VerticalAlignment="Center"
+                                                                                  IsVisible="{Binding HasMultipleLanguages}"/>
+                                                                        </StackPanel>
+                                                                    </Border>
+                                                                    <Popup PlacementTarget="{Binding ElementName=LanguageTagBorder}"
+                                                                           Placement="Bottom"
+                                                                           VerticalOffset="6"
+                                                                           IsLightDismissEnabled="False"
+                                                                           IsHitTestVisible="False">
+                                                                        <Popup.IsOpen>
+                                                                            <MultiBinding Converter="{x:Static BoolConverters.And}">
+                                                                                <Binding Path="IsPointerOver" ElementName="LanguageTagBorder"/>
+                                                                                <Binding Path="HasMultipleLanguages"/>
+                                                                            </MultiBinding>
+                                                                        </Popup.IsOpen>
+                                                                        <Border Background="{StaticResource SurfaceBrush}"
+                                                                                BorderBrush="{StaticResource BorderBrush}"
+                                                                                BorderThickness="1"
+                                                                                CornerRadius="8"
+                                                                                Padding="10,8"
+                                                                                MaxWidth="260">
+                                                                            <Border.BoxShadow>
+                                                                                <BoxShadows>0 4 12 0 #20000000</BoxShadows>
+                                                                            </Border.BoxShadow>
+                                                                            <TextBlock Text="{Binding LanguagesPopupText}"
+                                                                                       Foreground="{StaticResource TextSecondaryBrush}"
+                                                                                       FontSize="12"
+                                                                                       TextWrapping="Wrap"/>
+                                                                        </Border>
+                                                                    </Popup>
+                                                                </Panel>
                                                             </WrapPanel>
                                                             <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                                                                 <TextBlock Text="✓ Installed" Foreground="{StaticResource SuccessBrush}" FontWeight="Bold" 
@@ -609,7 +704,7 @@
                                     <ListBox.ItemTemplate>
                                         <DataTemplate x:DataType="entities:HistoryEntry">
                                             <Grid ColumnDefinitions="*,Auto,Auto">
-                                                <TextBlock Text="{Binding Text}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                                                <TextBlock Text="{Binding Text}" TextTrimming="CharacterEllipsis" MaxLines="1" VerticalAlignment="Center"/>
                                                 <Panel Grid.Column="1" Margin="4,0">
                                                     <Button Name="PlayHistoryBtn" Content="▶" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).PlayHistoryItemCommand}" CommandParameter="{Binding Id}" Classes="btn-icon"/>
                                                     <Popup IsOpen="{Binding IsPointerOver, ElementName=PlayHistoryBtn}"
@@ -775,8 +870,8 @@
             <Setter Property="FontWeight" Value="Bold"/>
         </Style>
         <Style Selector="ComboBox.model-selector ComboBoxItem" x:DataType="valueObjects:ModelMetadata">
-            <Setter Property="IsEnabled" Value="{Binding IsSelectable}"/>
-            <Setter Property="IsHitTestVisible" Value="{Binding IsSelectable}"/>
+            <Setter Property="IsEnabled" Value="{Binding !IsSeparator}"/>
+            <Setter Property="IsHitTestVisible" Value="{Binding !IsSeparator}"/>
         </Style>
         <Style Selector="TextBlock.unavailable">
             <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}"/>

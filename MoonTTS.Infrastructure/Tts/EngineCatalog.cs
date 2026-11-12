@@ -119,7 +119,8 @@ public class EngineCatalog : IModelRegistry
                     new Dictionary<string, string>(m.DownloadFiles),
                     m.Size,
                     m.RamUsage,
-                    m.CpuUsage))
+                    m.CpuUsage,
+                    m.Languages))
                 .ToList();
 
             return new EngineDescriptor(

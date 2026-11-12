@@ -16,6 +16,7 @@ namespace MoonTTS.Avalonia.Views;
         - IsExiting : bool
         - SettingsButtonPointerPressed : Action?
         - OnSettingsButtonPointerPressed(object?, PointerPressedEventArgs) : void
+        - OnInputBoxKeyDown(object?, KeyEventArgs) : void
         - OnClosing(WindowClosingEventArgs) : void
         - PositionAtBottomCenter(int, int?) : void
         - DragButton_PointerPressed(object?, PointerPressedEventArgs) : void
@@ -39,6 +40,26 @@ public partial class MainWindow : Window
             OnSettingsButtonPointerPressed,
             RoutingStrategies.Tunnel,
             handledEventsToo: true);
+
+        /* Tunnel so the arrows are caught before the TextBox moves its caret */
+        InputBox.AddHandler(KeyDownEvent, OnInputBoxKeyDown, RoutingStrategies.Tunnel);
+    }
+
+    /* Browses the speech history with Up / Down while the input box is focused */
+    private void OnInputBoxKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (DataContext is not MoonTTS.Avalonia.ViewModels.MainViewModel vm || e.KeyModifiers != KeyModifiers.None)
+            return;
+
+        if (e.Key == Key.Up)
+            vm.NavigateHistoryUp();
+        else if (e.Key == Key.Down)
+            vm.NavigateHistoryDown();
+        else
+            return;
+
+        InputBox.CaretIndex = InputBox.Text?.Length ?? 0;
+        e.Handled = true;
     }
 
     /* Indicates whether the application is shutting down rather than hiding to the tray */

@@ -11,6 +11,16 @@
       "size": 310,
       "ramUsage": 650,
       "cpuUsage": "high",
+      "languages": [
+        "Chinese",
+        "English",
+        "French",
+        "Hindi",
+        "Italian",
+        "Japanese",
+        "Portuguese",
+        "Spanish"
+      ],
       "downloadFiles": {
         "kokoro.onnx": "https://github.com/Lyrcaxis/KokoroSharpBinaries/releases/download/v2.0.0/kokoro.onnx"
       }
@@ -21,6 +31,16 @@
       "size": 169,
       "ramUsage": 400,
       "cpuUsage": "medium",
+      "languages": [
+        "Chinese",
+        "English",
+        "French",
+        "Hindi",
+        "Italian",
+        "Japanese",
+        "Portuguese",
+        "Spanish"
+      ],
       "downloadFiles": {
         "kokoro-v1.0-fp16.onnx": "https://github.com/Lyrcaxis/KokoroSharpBinaries/releases/download/v2.0.0/kokoro-fp16.onnx"
       }
@@ -31,6 +51,10 @@
       "size": 169,
       "ramUsage": 400,
       "cpuUsage": "medium",
+      "languages": [
+        "Chinese",
+        "English"
+      ],
       "downloadFiles": {
         "kokoro-zh-fp16.onnx": "https://github.com/Lyrcaxis/KokoroSharpBinaries/releases/download/v2.0.0/kokoro-zh-fp16.onnx"
       }

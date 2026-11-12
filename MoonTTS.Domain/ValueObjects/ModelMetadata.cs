@@ -5,6 +5,7 @@ namespace MoonTTS.Domain.ValueObjects;
         - CreateSeparator(string engineDisplayName) : ModelMetadata
         - IsUnselected : bool
         - IsSelectable : bool
+        - IsUnavailable : bool
         - ToString() : string
 */
 
@@ -17,6 +18,7 @@ public record ModelMetadata(
     int? Size = null,
     int? RamUsage = null,
     string? CpuUsage = null,
+    IReadOnlyList<string>? Languages = null,
     bool IsSeparator = false,
     bool IsDownloaded = true
 )
@@ -33,6 +35,9 @@ public record ModelMetadata(
 
     /* True when this entry can be chosen in a model selector dropdown */
     public bool IsSelectable => !IsSeparator && (IsUnselected || IsDownloaded);
+
+    /* True when this entry is a real model that is not downloaded yet */
+    public bool IsUnavailable => !IsSeparator && !IsUnselected && !IsDownloaded;
 
     /* Keeps the display name visible wherever the model is rendered through ToString */
     public override string ToString() => DisplayName;
