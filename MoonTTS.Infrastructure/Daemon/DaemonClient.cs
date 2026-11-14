@@ -18,6 +18,7 @@ namespace MoonTTS.Infrastructure.Daemon;
         - ReadStreamChunksAsync(NamedPipeClientStream client, CancellationToken ct) : IAsyncEnumerable<ReadOnlyMemory<byte>>
         - SynthesizeAsync(string text, float? speed, CancellationToken ct) : Task<Result<byte[]>>
         - KillDaemonAsync(CancellationToken ct) : Task<Result>
+        - StopSynthesisAsync(CancellationToken ct) : Task<Result>
         - GetStatusAsync(CancellationToken ct) : Task<DaemonResponse?>
         - SendControlRequestAsync(DaemonRequest request, CancellationToken ct) : Task<DaemonResponse?> 
 */
@@ -225,6 +226,17 @@ public class DaemonClient
         var response = await SendControlRequestAsync(new DaemonRequest { Action = DaemonIpcProtocol.ActionKill }, ct)
             .ConfigureAwait(false);
         return response?.Success == true ? Result.Success() : Result.Failure("Failure to stop daemon.");
+    }
+
+    /* Requests cancellation of an ongoing daemon synthesis stream */
+    public async Task<Result> StopSynthesisAsync(CancellationToken ct = default)
+    {
+        if (!await IsRunningAsync().ConfigureAwait(false))
+            return Result.Success();
+
+        var response = await SendControlRequestAsync(new DaemonRequest { Action = DaemonIpcProtocol.ActionStop }, ct)
+            .ConfigureAwait(false);
+        return response?.Success == true ? Result.Success() : Result.Failure("Failed to stop daemon synthesis.");
     }
     
     /* Queries the status, active model, and idle countdown of the background daemon */

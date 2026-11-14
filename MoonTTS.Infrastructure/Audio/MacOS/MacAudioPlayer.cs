@@ -14,7 +14,7 @@ namespace MoonTTS.Infrastructure.Audio.MacOS;
         - SetVolume(int? primaryVolume, int? monitorVolume) : void
         - PlayPcmAsync(ReadOnlyMemory<byte> pcmBytes, AudioFormat format, CancellationToken cancellationToken) : Task<Result>
         - StreamPcmAsync(IAsyncEnumerable<ReadOnlyMemory<byte>> pcmChunks, AudioFormat format, CancellationToken cancellationToken) : Task<Result>
-        - PlayQueueStreamAsync(byte[] pcmBytes, string? deviceUid, float volume, bool isPrimary, CancellationToken token) : Task<Result>
+        - PlayQueueStreamAsync(byte[] pcmBytes, AudioFormat format, string? deviceUid, float volume, bool isPrimary, CancellationToken token) : Task<Result>
         - Pause() : void
         - Resume() : void
         - Stop() : void
@@ -162,13 +162,13 @@ public class MacAudioPlayer : IAudioPlayer
             if (playPrimary)
             {
                 string? targetUid = ResolveDeviceUid(primaryId);
-                tasks.Add(PlayQueueStreamAsync(rawArray, targetUid, pVol, isPrimary: true, linkedToken));
+                tasks.Add(PlayQueueStreamAsync(rawArray, format, targetUid, pVol, isPrimary: true, linkedToken));
             }
 
             if (playMonitor)
             {
                 string? targetUid = ResolveDeviceUid(monitorId);
-                tasks.Add(PlayQueueStreamAsync(rawArray, targetUid, mVol, isPrimary: false, linkedToken));
+                tasks.Add(PlayQueueStreamAsync(rawArray, format, targetUid, mVol, isPrimary: false, linkedToken));
             }
 
             var results = await Task.WhenAll(tasks);
@@ -199,6 +199,7 @@ public class MacAudioPlayer : IAudioPlayer
 
     private Task<Result> PlayQueueStreamAsync(
         byte[] pcmBytes,
+        AudioFormat format,
         string? deviceUid,
         float volume,
         bool isPrimary,
@@ -206,17 +207,20 @@ public class MacAudioPlayer : IAudioPlayer
     {
         var tcs = new TaskCompletionSource<Result>();
 
-        /* Format: 24000Hz, 16-bit mono PCM */
+        int channels = Math.Max((short)1, format.Channels);
+        int bytesPerSample = Math.Max(1, format.BitDepth / 8);
+        uint bytesPerFrame = (uint)(bytesPerSample * channels);
+
         var asbd = new MacCoreAudioApi.AudioStreamBasicDescription
         {
-            mSampleRate = 24000.0,
+            mSampleRate = format.SampleRate,
             mFormatID = MacCoreAudioApi.kAudioFormatLinearPCM,
             mFormatFlags = MacCoreAudioApi.kAudioFormatFlagIsSignedInteger | MacCoreAudioApi.kAudioFormatFlagIsPacked,
-            mBytesPerPacket = 2,
+            mBytesPerPacket = bytesPerFrame,
             mFramesPerPacket = 1,
-            mBytesPerFrame = 2,
-            mChannelsPerFrame = 1,
-            mBitsPerChannel = 16,
+            mBytesPerFrame = bytesPerFrame,
+            mChannelsPerFrame = (uint)channels,
+            mBitsPerChannel = (uint)format.BitDepth,
             mReserved = 0
         };
 

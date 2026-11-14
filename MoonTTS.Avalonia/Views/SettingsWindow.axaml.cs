@@ -76,13 +76,16 @@ public partial class SettingsWindow : Window
         RepositionWindow(isAdvanced: false);
     }
 
-    /* Automatically hides and resets to Quick Settings when clicking outside. The hide is deferred until the pending
-       activation of the clicked window has finished: hiding the active window in the middle of its deactivation makes
-       Windows pick an unrelated application behind the HUD to activate, which stole focus from the HUD controls */
+    /* Automatically hides compact Quick Settings on focus loss while preserving open Advanced Settings or active hotkey capture */
     private void OnWindowDeactivated(object? sender, EventArgs e)
     {
         if (DataContext is SettingsViewModel vm)
         {
+            vm.FlushPendingSave();
+
+            if (vm.IsAdvancedView || vm.IsRecordingToggleHotkey || vm.IsRecordingPhraseHotkey)
+                return;
+
             vm.CancelRecording();
         }
         LastDeactivatedTick = Environment.TickCount64;
@@ -143,8 +146,9 @@ public partial class SettingsWindow : Window
             bool alt = e.KeyModifiers.HasFlag(KeyModifiers.Alt);
             bool shift = e.KeyModifiers.HasFlag(KeyModifiers.Shift);
             bool win = e.KeyModifiers.HasFlag(KeyModifiers.Meta);
+            bool isFunctionKey = e.Key is >= Key.F1 and <= Key.F24;
 
-            if (!ctrl && !alt && !shift && !win)
+            if (!ctrl && !alt && !shift && !win && !isFunctionKey)
             {
                 vm.CancelRecording();
                 e.Handled = true;
@@ -219,9 +223,12 @@ public partial class SettingsWindow : Window
         };
     }
 
-    /* Intercepts close to hide window and reset state instead of destroying window handle */
+    /* Intercepts close to hide window, flush pending saves, and reset state instead of destroying window handle */
     protected override void OnClosing(WindowClosingEventArgs e)
     {
+        if (DataContext is SettingsViewModel vm)
+            vm.FlushPendingSave();
+
         if (!IsExiting)
         {
             e.Cancel = true;

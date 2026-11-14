@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Diagnostics;
 using MoonTTS.Domain.Common;
 using MoonTTS.Domain.Interfaces;
 using MoonTTS.Domain.ValueObjects;
@@ -11,11 +13,15 @@ namespace MoonTTS.Infrastructure.Tts;
             string destinationFolder, 
             IProgress<double>? progress, 
             CancellationToken cancellationToken) : Task<Result>
+        - ProbeRemoteLengthAsync(string url, CancellationToken cancellationToken) : Task<long?>
         - CleanUpTempFile(string? tempPath) : void 
 */
 
 public class HttpModelDownloader : IModelDownloader
 {
+    private const int DownloadBufferSize = 65536;
+    private const long ProgressReportIntervalMs = 50;
+
     private readonly HttpClient _httpClient;
     
     /* Injects HttpClient to not open too many network sockets */
@@ -24,6 +30,7 @@ public class HttpModelDownloader : IModelDownloader
         _httpClient = httpClient;
     }
 
+    /* Downloads missing model files atomically with HEAD size probing, shared buffer pooling, and throttled progress */
     public async Task<Result> DownloadModelAsync(
         ModelMetadata model,
         string destinationFolder,
@@ -36,88 +43,104 @@ public class HttpModelDownloader : IModelDownloader
         {
             Directory.CreateDirectory(destinationFolder);
 
+            var filesToDownload = new List<(string FileName, string Url, long? RemoteLength)>();
             long totalExpectedBytes = 0;
-
-            /* Requests the file size to be downloaded */
-            foreach (var url in model.DownloadFiles.Values)
-            {
-                using var headRequest = new HttpRequestMessage(HttpMethod.Get, url);
-                using var headResponse = await _httpClient.SendAsync(
-                    headRequest,
-                    HttpCompletionOption.ResponseHeadersRead,
-                    cancellationToken);
-
-                if (headResponse.Content.Headers.ContentLength.HasValue)
-                {
-                    totalExpectedBytes += headResponse.Content.Headers.ContentLength.Value;
-                }
-            }
-
             long totalDownloaded = 0;
 
+            /* Probes expected file sizes via HEAD and skips shared/complete files already on disk */
             foreach (var file in model.DownloadFiles)
             {
-                string expectedFileName = file.Key;
-                string remoteUrl = file.Value;
+                string finalFilePath = Path.Combine(destinationFolder, file.Key);
+                long? remoteLength = await ProbeRemoteLengthAsync(file.Value, cancellationToken);
 
-                /* Calculates file paths */
-                string finalFilePath = Path.Combine(destinationFolder, expectedFileName);
-                currentTempFilePath = finalFilePath + ".tmp";
-
-                /* Opens HTTP connection */
-                using var response = await _httpClient.GetAsync(
-                    remoteUrl,
-                    HttpCompletionOption.ResponseHeadersRead,
-                    cancellationToken);
-
-                if (!response.IsSuccessStatusCode)
+                if (File.Exists(finalFilePath))
                 {
-                    return Result.Failure(
-                        $"Server returned error {(int)response.StatusCode}: {response.ReasonPhrase} for {expectedFileName}.");
-                }
-
-                /* Streams the file from HF to the storage */
-                using var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken);
-                using var fileStream = new FileStream(
-                    currentTempFilePath,
-                    FileMode.Create,
-                    FileAccess.Write,
-                    FileShare.None,
-                    8192,
-                    true);
-
-                byte[] buffer = new byte[8192]; /* 8KB chunks */
-                int bytesRead;
-
-                /* Loop until the download finishes, or the user clicks "Cancel" */
-                while ((bytesRead = await contentStream.ReadAsync(
-                           buffer,
-                           0,
-                           buffer.Length,
-                           cancellationToken)) != 0)
-                {
-                    await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
-                    totalDownloaded += bytesRead;
-
-                    /* Reports progress back to the UI */
-                    if (progress != null && totalExpectedBytes > 0)
+                    long existingSize = new FileInfo(finalFilePath).Length;
+                    if (existingSize > 0 && (!remoteLength.HasValue || existingSize == remoteLength.Value))
                     {
-                        double percentage = Math.Round((double)totalDownloaded / totalExpectedBytes * 100, 2);
-                        progress.Report(percentage);
+                        totalExpectedBytes += existingSize;
+                        totalDownloaded += existingSize;
+                        continue;
                     }
                 }
 
-                /* Ensures data is saved before renaming */
-                await fileStream.FlushAsync(cancellationToken);
-                fileStream.Close();
+                if (remoteLength.HasValue)
+                    totalExpectedBytes += remoteLength.Value;
 
-                /* Renames the .tmp to the correct name */
-                if (File.Exists(finalFilePath))
-                    File.Delete(finalFilePath);
-                File.Move(currentTempFilePath, finalFilePath);
-                currentTempFilePath = null;
+                filesToDownload.Add((file.Key, file.Value, remoteLength));
             }
 
+            if (filesToDownload.Count == 0)
+            {
+                progress?.Report(100.0);
+                return Result.Success();
+            }
+
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(DownloadBufferSize);
+            long minReportTicks = Stopwatch.Frequency * ProgressReportIntervalMs / 1000;
+            long lastReportTimestamp = 0;
+
+            try
+            {
+                foreach (var (expectedFileName, remoteUrl, _) in filesToDownload)
+                {
+                    string finalFilePath = Path.Combine(destinationFolder, expectedFileName);
+                    currentTempFilePath = finalFilePath + ".part";
+
+                    using var response = await _httpClient.GetAsync(
+                        remoteUrl,
+                        HttpCompletionOption.ResponseHeadersRead,
+                        cancellationToken);
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        CleanUpTempFile(currentTempFilePath);
+                        return Result.Failure(
+                            $"Server returned error {(int)response.StatusCode}: {response.ReasonPhrase} for {expectedFileName}.");
+                    }
+
+                    using (var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken))
+                    using (var fileStream = new FileStream(
+                        currentTempFilePath,
+                        FileMode.Create,
+                        FileAccess.Write,
+                        FileShare.None,
+                        DownloadBufferSize,
+                        FileOptions.Asynchronous))
+                    {
+                        int bytesRead;
+                        while ((bytesRead = await contentStream.ReadAsync(
+                                   buffer.AsMemory(0, DownloadBufferSize),
+                                   cancellationToken)) != 0)
+                        {
+                            await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
+                            totalDownloaded += bytesRead;
+
+                            if (progress != null && totalExpectedBytes > 0)
+                            {
+                                long now = Stopwatch.GetTimestamp();
+                                if (now - lastReportTimestamp >= minReportTicks)
+                                {
+                                    lastReportTimestamp = now;
+                                    double percentage = Math.Min(100.0, Math.Round((double)totalDownloaded / totalExpectedBytes * 100, 2));
+                                    progress.Report(percentage);
+                                }
+                            }
+                        }
+
+                        await fileStream.FlushAsync(cancellationToken);
+                    }
+
+                    File.Move(currentTempFilePath, finalFilePath, overwrite: true);
+                    currentTempFilePath = null;
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+
+            progress?.Report(100.0);
             return Result.Success();
         }
         catch (OperationCanceledException)
@@ -137,6 +160,53 @@ public class HttpModelDownloader : IModelDownloader
         }
     }
 
+    /* Queries remote Content-Length using HEAD first and falls back to header-only GET only if needed */
+    private async Task<long?> ProbeRemoteLengthAsync(string url, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var headRequest = new HttpRequestMessage(HttpMethod.Head, url);
+            using var headResponse = await _httpClient.SendAsync(
+                headRequest,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
+
+            if (headResponse.IsSuccessStatusCode && headResponse.Content.Headers.ContentLength.HasValue)
+                return headResponse.Content.Headers.ContentLength.Value;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            /* Fall back to header-only GET below */
+        }
+
+        try
+        {
+            using var getRequest = new HttpRequestMessage(HttpMethod.Get, url);
+            using var getResponse = await _httpClient.SendAsync(
+                getRequest,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
+
+            if (getResponse.IsSuccessStatusCode && getResponse.Content.Headers.ContentLength.HasValue)
+                return getResponse.Content.Headers.ContentLength.Value;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            /* Unknown content length; actual download handles HTTP errors directly */
+        }
+
+        return null;
+    }
+
+    /* Removes partial temporary download files after failure or cancellation */
     private static void CleanUpTempFile(string? tempPath)
     {
         if (!string.IsNullOrEmpty(tempPath) && File.Exists(tempPath))

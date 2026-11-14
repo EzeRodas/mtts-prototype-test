@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using System.Text.Json;
 using KokoroSharp;
 using KokoroSharp.Core;
@@ -15,7 +14,6 @@ namespace MoonTTS.Engine.Kokoro;
         - HandleLoadModelAsync(EngineFrame frame) : Task
         - StartSynthesis(EngineFrame frame) : Task
         - SynthesizeAsync(SynthesizeRequest request, CancellationToken cancellationToken) : Task
-        - ApplyDeClickingInPlace(Span<byte> pcmBytes, int sampleRate) : void
         - SendAsync(EngineOpcode opcode, ReadOnlyMemory<byte> payload) : Task
         - SendJsonAsync<T>(EngineOpcode opcode, T message, JsonTypeInfo<T> typeInfo) : Task
         - SendErrorAsync(string code, string message) : Task
@@ -121,10 +119,17 @@ public sealed class KokoroWorker : IDisposable
                 return;
             }
 
-            /* Suppress constant-folding and optimization warnings from ONNX Runtime */
+            /* Suppress constant-folding warnings and configure optimal single-utterance CPU execution */
+            int intraThreads = Math.Clamp(Environment.ProcessorCount / 2, 2, 4);
             using var options = new SessionOptions
             {
-                LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_ERROR
+                LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_ERROR,
+                GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
+                ExecutionMode = ExecutionMode.ORT_SEQUENTIAL,
+                EnableCpuMemArena = true,
+                EnableMemoryPattern = true,
+                InterOpNumThreads = 1,
+                IntraOpNumThreads = intraThreads
             };
             var synthesizer = KokoroWavSynthesizer.LoadModel(modelFile, options);
 
@@ -188,7 +193,7 @@ public sealed class KokoroWorker : IDisposable
                 byte[] rawPcmBytes = await _synthesizer.SynthesizeAsync(request.Text, voice, pipelineConfig).WaitAsync(cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
 
-                ApplyDeClickingInPlace(rawPcmBytes, SampleRate);
+                AudioDsp.ApplyDeClickingInPlace(rawPcmBytes, SampleRate);
                 await SendAsync(EngineOpcode.AudioChunk, rawPcmBytes);
             }
 
@@ -201,28 +206,6 @@ public sealed class KokoroWorker : IDisposable
         catch (Exception ex)
         {
             await SendErrorAsync("synthesis_failed", ex.Message);
-        }
-    }
-
-    /* Smooths sample boundaries (3ms fade-in, 5ms fade-out) in-place to prevent speaker clicking */
-    private static void ApplyDeClickingInPlace(Span<byte> pcmBytes, int sampleRate)
-    {
-        if (pcmBytes.Length < 4) return;
-        Span<short> samples = MemoryMarshal.Cast<byte, short>(pcmBytes);
-
-        int fadeInSamples = Math.Min(sampleRate * 3 / 1000, samples.Length / 2);
-        for (int i = 0; i < fadeInSamples; i++)
-        {
-            float factor = (float)i / fadeInSamples;
-            samples[i] = (short)(samples[i] * factor);
-        }
-
-        int fadeOutSamples = Math.Min(sampleRate * 5 / 1000, samples.Length / 2);
-        for (int i = 0; i < fadeOutSamples; i++)
-        {
-            float factor = (float)i / fadeOutSamples;
-            int idx = samples.Length - 1 - i;
-            samples[idx] = (short)(samples[idx] * factor);
         }
     }
 

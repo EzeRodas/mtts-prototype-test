@@ -6,6 +6,9 @@ namespace MoonTTS.Domain.Interfaces;
 /* Unified speech pipeline interface for text splitting, dictionary replacements, streaming playback and history */
 public interface ISpeechPipeline
 {
+    /* Fired whenever IsSpeaking or IsPaused changes */
+    event Action? PlaybackStateChanged;
+
     /* Synthesizes and streams speech using default accessibility settings */
     Task<Result<SpeechResult>> SpeakAsync(
         string text, 
@@ -15,6 +18,11 @@ public interface ISpeechPipeline
     Task<Result<SpeechResult>> SpeakAsync(
         string text, 
         SpeechOptions options, 
+        CancellationToken cancellationToken = default);
+
+    /* Plays a pre-rendered WAV file through the active pipeline session so HUD controls stay unified */
+    Task<Result> PlayWavFileAsync(
+        string wavPath,
         CancellationToken cancellationToken = default);
 
     /* Pauses the active speech playback */

@@ -26,6 +26,7 @@ namespace MoonTTS.Infrastructure.Audio;
         - ReapCompletedBuffers(WaveOutTarget target) : int
         - WaitForTargetCapacityAsync(WaveOutTarget target, int maxInFlight, CancellationToken token) : Task
         - DrainTargetAsync(WaveOutTarget target, CancellationToken token) : Task
+        - WaitHandleAsync(WaitHandle handle, int timeoutMs, CancellationToken token) : Task<bool>
         - DisposeTarget(WaveOutTarget target) : void
         - ExtractDeviceName(ref LibWinMm.WAVEOUTCAPSW caps, uint index) : string
         - PreparedWaveBuffer
@@ -456,8 +457,31 @@ public class WindowsAudioPlayer : IAudioPlayer
             float liveVolume = target.VolumeProvider();
             SimdAudioProcessor.ScaleVolumeInPlace(scaledSpan, liveVolume);
 
-            nint dataPtr = (nint)NativeMemory.Alloc((nuint)length);
-            nint hdrPtr = (nint)NativeMemory.AllocZeroed((nuint)sizeof(LibWinMm.WAVEHDR));
+            nint hdrPtr;
+            nint dataPtr;
+            int capacity;
+            if (target.FreePool.TryPop(out PreparedWaveBuffer pooled))
+            {
+                hdrPtr = pooled.HeaderPtr;
+                NativeMemory.Clear((void*)hdrPtr, (nuint)sizeof(LibWinMm.WAVEHDR));
+                if (pooled.Capacity >= length)
+                {
+                    dataPtr = pooled.DataPtr;
+                    capacity = pooled.Capacity;
+                }
+                else
+                {
+                    NativeMemory.Free((void*)pooled.DataPtr);
+                    dataPtr = (nint)NativeMemory.Alloc((nuint)length);
+                    capacity = length;
+                }
+            }
+            else
+            {
+                dataPtr = (nint)NativeMemory.Alloc((nuint)length);
+                hdrPtr = (nint)NativeMemory.AllocZeroed((nuint)sizeof(LibWinMm.WAVEHDR));
+                capacity = length;
+            }
 
             fixed (byte* srcPtr = scaledSpan)
             {
@@ -486,12 +510,12 @@ public class WindowsAudioPlayer : IAudioPlayer
                 return Result.Failure($"waveOutWrite failed with MMRESULT {writeRes}.");
             }
 
-            target.InFlight.Enqueue(new PreparedWaveBuffer(hdrPtr, dataPtr));
+            target.InFlight.Enqueue(new PreparedWaveBuffer(hdrPtr, dataPtr, capacity));
             return Result.Success();
         }
     }
 
-    /* Unprepares and frees all completed WAVEHDR buffers at the front of the target queue; returns remaining in-flight count */
+    /* Unprepares completed WAVEHDR buffers and returns them to the target pool; returns remaining in-flight count */
     private static unsafe int ReapCompletedBuffers(WaveOutTarget target)
     {
         if (target.IsDisposed)
@@ -505,8 +529,7 @@ public class WindowsAudioPlayer : IAudioPlayer
 
             target.InFlight.Dequeue();
             LibWinMm.waveOutUnprepareHeader(target.Handle, front.HeaderPtr, (uint)sizeof(LibWinMm.WAVEHDR));
-            NativeMemory.Free((void*)front.HeaderPtr);
-            NativeMemory.Free((void*)front.DataPtr);
+            target.FreePool.Push(front);
         }
 
         return target.InFlight.Count;
@@ -531,7 +554,7 @@ public class WindowsAudioPlayer : IAudioPlayer
             if (remaining < maxInFlight)
                 return;
 
-            await Task.Run(() => target.BufferDoneEvent.WaitOne(15), token);
+            await WaitHandleAsync(target.BufferDoneEvent, 15, token);
         }
     }
 
@@ -551,8 +574,61 @@ public class WindowsAudioPlayer : IAudioPlayer
             if (remaining == 0)
                 return;
 
-            await Task.Run(() => target.BufferDoneEvent.WaitOne(15), token);
+            await WaitHandleAsync(target.BufferDoneEvent, 15, token);
         }
+    }
+
+    /* Holds registration state for non-blocking WaitHandle awaiting without ThreadPool thread blocking */
+    private sealed class WaitHandleState
+    {
+        public TaskCompletionSource<bool> Tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public RegisteredWaitHandle? RegisteredWait;
+        public CancellationTokenRegistration CancellationReg;
+        public int Completed;
+
+        public void Complete(bool timedOut)
+        {
+            if (Interlocked.Exchange(ref Completed, 1) != 0)
+                return;
+
+            RegisteredWait?.Unregister(null);
+            CancellationReg.Dispose();
+            Tcs.TrySetResult(!timedOut);
+        }
+
+        public void Cancel()
+        {
+            if (Interlocked.Exchange(ref Completed, 1) != 0)
+                return;
+
+            RegisteredWait?.Unregister(null);
+            CancellationReg.Dispose();
+            Tcs.TrySetCanceled();
+        }
+    }
+
+    /* Awaits an OS WaitHandle asynchronously using ThreadPool wait registration */
+    private static Task<bool> WaitHandleAsync(WaitHandle handle, int timeoutMs, CancellationToken token)
+    {
+        if (token.IsCancellationRequested)
+            return Task.FromCanceled<bool>(token);
+
+        var state = new WaitHandleState();
+        state.RegisteredWait = ThreadPool.RegisterWaitForSingleObject(
+            handle,
+            static (rawState, timedOut) => ((WaitHandleState)rawState!).Complete(timedOut),
+            state,
+            timeoutMs,
+            executeOnlyOnce: true);
+
+        if (token.CanBeCanceled)
+        {
+            state.CancellationReg = token.Register(
+                static rawState => ((WaitHandleState)rawState!).Cancel(),
+                state);
+        }
+
+        return state.Tcs.Task;
     }
 
     /* Resets the WinMM device, frees all remaining WAVEHDR buffers, and closes the handle (must be called under _processLock) */
@@ -572,6 +648,12 @@ public class WindowsAudioPlayer : IAudioPlayer
                 LibWinMm.waveOutUnprepareHeader(target.Handle, buf.HeaderPtr, (uint)sizeof(LibWinMm.WAVEHDR));
                 NativeMemory.Free((void*)buf.HeaderPtr);
                 NativeMemory.Free((void*)buf.DataPtr);
+            }
+
+            while (target.FreePool.TryPop(out PreparedWaveBuffer pooled))
+            {
+                NativeMemory.Free((void*)pooled.HeaderPtr);
+                NativeMemory.Free((void*)pooled.DataPtr);
             }
 
             LibWinMm.waveOutClose(target.Handle);
@@ -604,8 +686,8 @@ public class WindowsAudioPlayer : IAudioPlayer
         }
     }
 
-    /* Tracks an unmanaged WAVEHDR and its PCM payload buffer */
-    private readonly record struct PreparedWaveBuffer(nint HeaderPtr, nint DataPtr);
+    /* Tracks an unmanaged WAVEHDR and its pooled PCM payload buffer */
+    private readonly record struct PreparedWaveBuffer(nint HeaderPtr, nint DataPtr, int Capacity);
 
     /* Represents an active WinMM waveOut device playback stream */
     private sealed class WaveOutTarget(nint handle, AutoResetEvent bufferDoneEvent, Func<float> volumeProvider)
@@ -614,6 +696,7 @@ public class WindowsAudioPlayer : IAudioPlayer
         public AutoResetEvent BufferDoneEvent { get; } = bufferDoneEvent;
         public Func<float> VolumeProvider { get; } = volumeProvider;
         public Queue<PreparedWaveBuffer> InFlight { get; } = new();
+        public Stack<PreparedWaveBuffer> FreePool { get; } = new();
         public bool IsDisposed { get; set; }
     }
 

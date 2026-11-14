@@ -16,11 +16,11 @@ public class ShortcutCombo
             throw new ArgumentNullException("The shortcut must contain a main key.");
         }
 
-        /* Validates that at least one modifier key is provided to prevent capturing plain typing keys */
-        if (!ctrl && !alt && !shift && !win)
+        /* Validates that at least one modifier key is provided unless MainKey is a standalone F1-F24 function key */
+        if (!ctrl && !alt && !shift && !win && !IsFunctionKey(mainKey))
         {
             throw new ArgumentException(
-                "The shortcut must contain at least one modifier key (Ctrl, Alt, Shift, or Win).",
+                "The shortcut must contain at least one modifier key (Ctrl, Alt, Shift, or Win) or be a standalone function key (F1-F24).",
                 nameof(mainKey)
             );
         }
@@ -71,11 +71,24 @@ public class ShortcutCombo
                 mainKey = token;
         }
 
-        if (string.IsNullOrEmpty(mainKey) || (!ctrl && !alt && !shift && !win))
+        if (string.IsNullOrEmpty(mainKey) || (!ctrl && !alt && !shift && !win && !IsFunctionKey(mainKey)))
             return false;
 
         combo = new ShortcutCombo(ctrl, alt, shift, win, mainKey);
         return true;
+    }
+
+    /* Returns true when the key name represents a standalone function key F1 through F24 */
+    public static bool IsFunctionKey(string? key)
+    {
+        if (string.IsNullOrWhiteSpace(key))
+            return false;
+
+        ReadOnlySpan<char> span = key.AsSpan().Trim();
+        return span.Length is 2 or 3
+               && (span[0] == 'F' || span[0] == 'f')
+               && int.TryParse(span[1..], out int fnNumber)
+               && fnNumber is >= 1 and <= 24;
     }
 
     public override string ToString()

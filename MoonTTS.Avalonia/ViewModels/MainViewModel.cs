@@ -1,6 +1,7 @@
 using System.Threading.Tasks;
 using System.Windows.Input;
 using Avalonia.Controls;
+using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MoonTTS.Avalonia.Services;
@@ -19,6 +20,7 @@ namespace MoonTTS.Avalonia.ViewModels;
         - ShowHistoryEntry(int) : void
         - PlayAsync() : Task
         - ShowStatusAsync(string message) : void
+        - SyncPlaybackState() : void
         - Stop() : void
         - PauseResume() : void
 */
@@ -34,6 +36,7 @@ public partial class MainViewModel : ViewModelBase
     private int _historyIndex = -1;
     private string _draftText = string.Empty;
     private bool _isNavigatingHistory;
+    private bool _isLaunchingSpeech;
     
     public ICommand? CloseAppCommand { get; }
     public ICommand? ShowMainWindowCommand { get; }
@@ -63,9 +66,15 @@ public partial class MainViewModel : ViewModelBase
     {
         _historyManager = historyManager;
         if (_historyManager != null)
+        {
             _historyManager.OnHistoryChanged += () => _historyIndex = -1;
+            _historyManager.OnPlaybackStateChanged += () => Dispatcher.UIThread.Post(SyncPlaybackState);
+        }
 
         _speechPipeline = speechPipeline;
+        if (_speechPipeline != null)
+            _speechPipeline.PlaybackStateChanged += () => Dispatcher.UIThread.Post(SyncPlaybackState);
+
         _windowService = windowService;
         _hotKeyManager = hotKeyManager;
 
@@ -145,6 +154,7 @@ public partial class MainViewModel : ViewModelBase
 
         string text = TextToSpeak;
         TextToSpeak = string.Empty;
+        _isLaunchingSpeech = true;
         IsSynthesizing = true;
         IsPaused = false;
         StatusMessage = null;
@@ -167,8 +177,8 @@ public partial class MainViewModel : ViewModelBase
         }
         finally
         {
-            IsPaused = false;
-            IsSynthesizing = false;
+            _isLaunchingSpeech = false;
+            SyncPlaybackState();
         }
     }
 
@@ -188,32 +198,45 @@ public partial class MainViewModel : ViewModelBase
             /* Ignored */
         }
     }
+
+    /* Mirrors playback state from both the main pipeline (including hotkeys) and standalone history playback */
+    private void SyncPlaybackState()
+    {
+        IsSynthesizing = _isLaunchingSpeech
+                         || (_speechPipeline?.IsSpeaking == true)
+                         || (_historyManager?.IsPlaying == true);
+        IsPaused = (_speechPipeline?.IsPaused == true)
+                   || (_historyManager?.IsPaused == true);
+    }
     
-    /* Cancels ongoing speech synthesis and stops audio playback */
+    /* Cancels ongoing speech synthesis and stops audio playback across HUD, hotkeys, and history */
     [RelayCommand]
     private void Stop()
     {
-        if (_speechPipeline == null) return;
-        _speechPipeline.Stop();
-        IsPaused = false;
-        IsSynthesizing = false;
+        _speechPipeline?.Stop();
+        _historyManager?.Stop();
+        SyncPlaybackState();
     }
 
-    /* Toggles between pausing and resuming the active speech playback */
+    /* Toggles between pausing and resuming whichever audio source is currently active */
     [RelayCommand]
     private void PauseResume()
     {
-        if (_speechPipeline == null) return;
-
         if (!IsPaused)
         {
-            _speechPipeline.Pause();
-            IsPaused = true;
+            if (_speechPipeline?.IsSpeaking == true)
+                _speechPipeline.Pause();
+            else if (_historyManager?.IsPlaying == true)
+                _historyManager.Pause();
         }
         else
         {
-            _speechPipeline.Resume();
-            IsPaused = false;
+            if (_speechPipeline?.IsSpeaking == true || _speechPipeline?.IsPaused == true)
+                _speechPipeline.Resume();
+            else if (_historyManager?.IsPlaying == true || _historyManager?.IsPaused == true)
+                _historyManager.Resume();
         }
+
+        SyncPlaybackState();
     }
 }

@@ -51,14 +51,19 @@ public class LinuxProcessRunner : ILinuxCommandRunner
             if (!proc.Start())
                 return Result<string>.Failure($"Failed to start '{fileName}'.");
 
-            string output = proc.StandardOutput.ReadToEnd();
-            string error = proc.StandardError.ReadToEnd();
+            using var readCts = new CancellationTokenSource(timeoutMs);
+            Task<string> outputTask = proc.StandardOutput.ReadToEndAsync(readCts.Token);
+            Task<string> errorTask = proc.StandardError.ReadToEndAsync(readCts.Token);
 
             if (!proc.WaitForExit(timeoutMs))
             {
+                readCts.Cancel();
                 try { proc.Kill(entireProcessTree: true); } catch { }
                 return Result<string>.Failure($"'{fileName}' timed out after {timeoutMs}ms.");
             }
+
+            string output = outputTask.GetAwaiter().GetResult();
+            string error = errorTask.GetAwaiter().GetResult();
             return proc.ExitCode == 0 
                 ? Result<string>.Success(output)
                 : Result<string>.Failure($"'{fileName} {arguments}' failed (exit {proc.ExitCode}): {error.Trim()}");
@@ -82,8 +87,8 @@ public class LinuxProcessRunner : ILinuxCommandRunner
                     FileName = fileName,
                     Arguments = arguments,
                     RedirectStandardInput = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
+                    RedirectStandardOutput = false,
+                    RedirectStandardError = false,
                     UseShellExecute = false,
                     CreateNoWindow = true
                 }

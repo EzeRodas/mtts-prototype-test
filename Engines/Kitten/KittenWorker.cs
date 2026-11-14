@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using Microsoft.ML.OnnxRuntime;
@@ -12,10 +11,9 @@ namespace MoonTTS.Engine.Kitten;
         - HandleAsync(EngineFrame frame) : Task<bool>
         - WaitForIdleAsync() : Task
         - HandleLoadModelAsync(EngineFrame frame) : Task
+        - WarmUpSession(InferenceSession session, Dictionary<string, float[]> voices) : void
         - StartSynthesis(EngineFrame frame) : Task
         - SynthesizeAsync(SynthesizeRequest request, CancellationToken cancellationToken) : Task
-        - ConvertFloatToPcm16(ReadOnlySpan<float> samples) : byte[]
-        - ApplyDeClickingInPlace(Span<byte> pcmBytes, int sampleRate) : void
         - SendAsync(EngineOpcode opcode, ReadOnlyMemory<byte> payload) : Task
         - SendJsonAsync<T>(EngineOpcode opcode, T message, JsonTypeInfo<T> typeInfo) : Task
         - SendErrorAsync(string code, string message) : Task
@@ -145,15 +143,23 @@ public sealed class KittenWorker : IDisposable
                 return;
             }
 
+            int intraThreads = Math.Clamp(Environment.ProcessorCount / 2, 2, 4);
             using var options = new SessionOptions
             {
-                LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_ERROR
+                LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_ERROR,
+                GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
+                ExecutionMode = ExecutionMode.ORT_SEQUENTIAL,
+                EnableCpuMemArena = true,
+                EnableMemoryPattern = true,
+                InterOpNumThreads = 1,
+                IntraOpNumThreads = intraThreads
             };
 
             var session = new InferenceSession(onnxFile, options);
             var voices = NpzVoiceLoader.Load(npzFile);
 
             EspeakPhonemizer.EnsureInitialized();
+            WarmUpSession(session, voices);
 
             _session?.Dispose();
             _session = session;
@@ -165,6 +171,31 @@ public sealed class KittenWorker : IDisposable
         catch (Exception ex)
         {
             await SendErrorAsync("model_load_failed", ex.Message);
+        }
+    }
+
+    /* Executes a tiny 3-token warm-up pass so ONNX Runtime pre-allocates its memory arena at load time */
+    private static void WarmUpSession(InferenceSession session, Dictionary<string, float[]> voices)
+    {
+        try
+        {
+            float[] styleVector = NpzVoiceLoader.GetStyleVector(voices, voices.Keys.FirstOrDefault() ?? string.Empty, 1);
+            var inputIdsTensor = new DenseTensor<long>(new long[] { 0, 4, 0 }, new[] { 1, 3 });
+            var styleTensor = new DenseTensor<float>(styleVector, new[] { 1, 256 });
+            var speedTensor = new DenseTensor<float>(new[] { 1.0f }, new[] { 1 });
+
+            var inputs = new NamedOnnxValue[]
+            {
+                NamedOnnxValue.CreateFromTensor("input_ids", inputIdsTensor),
+                NamedOnnxValue.CreateFromTensor("style", styleTensor),
+                NamedOnnxValue.CreateFromTensor("speed", speedTensor)
+            };
+
+            using var _ = session.Run(inputs);
+        }
+        catch
+        {
+            /* Warm-up failure is non-fatal; actual synthesis will report real session errors */
         }
     }
 
@@ -233,19 +264,22 @@ public sealed class KittenWorker : IDisposable
                 using var results = _session.Run(inputs);
                 cancellationToken.ThrowIfCancellationRequested();
 
-                float[] allSamples = results.First().AsEnumerable<float>().ToArray();
+                Tensor<float> outputTensor = results.First().AsTensor<float>();
+                ReadOnlySpan<float> allSamples = outputTensor is DenseTensor<float> dense
+                    ? dense.Buffer.Span
+                    : outputTensor.ToArray();
 
                 /* Trim trailing artifact samples (matching outputs[0][..., :-5000]) */
                 int trimmedLength = Math.Max(0, allSamples.Length - TrimTailSamples);
                 ReadOnlySpan<float> validSamples = trimmedLength > 0
-                    ? allSamples.AsSpan(0, trimmedLength)
+                    ? allSamples.Slice(0, trimmedLength)
                     : allSamples;
 
-                byte[] pcmBytes = ConvertFloatToPcm16(validSamples);
-
-                if (pcmBytes.Length > 0)
+                if (!validSamples.IsEmpty)
                 {
-                    ApplyDeClickingInPlace(pcmBytes, OutputSampleRate);
+                    byte[] pcmBytes = new byte[validSamples.Length * sizeof(short)];
+                    AudioDsp.ConvertFloatToPcm16(validSamples, pcmBytes);
+                    AudioDsp.ApplyDeClickingInPlace(pcmBytes, OutputSampleRate);
                     await SendAsync(EngineOpcode.AudioChunk, pcmBytes);
                 }
             }
@@ -260,46 +294,6 @@ public sealed class KittenWorker : IDisposable
         {
             Console.Error.WriteLine($"[KittenWorker] Synthesis exception: {ex}");
             await SendErrorAsync("synthesis_failed", ex.Message);
-        }
-    }
-
-    /* Converts float32 audio samples in [-1.0, 1.0] to 16-bit signed little-endian PCM bytes */
-    private static byte[] ConvertFloatToPcm16(ReadOnlySpan<float> samples)
-    {
-        if (samples.IsEmpty)
-            return Array.Empty<byte>();
-
-        byte[] pcmBytes = new byte[samples.Length * sizeof(short)];
-        Span<short> pcmSamples = MemoryMarshal.Cast<byte, short>(pcmBytes.AsSpan());
-
-        for (int i = 0; i < samples.Length; i++)
-        {
-            float clamped = Math.Clamp(samples[i], -1.0f, 1.0f);
-            pcmSamples[i] = (short)Math.Round(clamped * 32767.0f);
-        }
-
-        return pcmBytes;
-    }
-
-    /* Smooths sample boundaries (3ms fade-in, 5ms fade-out) in-place to prevent speaker clicking */
-    private static void ApplyDeClickingInPlace(Span<byte> pcmBytes, int sampleRate)
-    {
-        if (pcmBytes.Length < 4) return;
-        Span<short> samples = MemoryMarshal.Cast<byte, short>(pcmBytes);
-
-        int fadeInSamples = Math.Min(sampleRate * 3 / 1000, samples.Length / 2);
-        for (int i = 0; i < fadeInSamples; i++)
-        {
-            float factor = (float)i / fadeInSamples;
-            samples[i] = (short)(samples[i] * factor);
-        }
-
-        int fadeOutSamples = Math.Min(sampleRate * 5 / 1000, samples.Length / 2);
-        for (int i = 0; i < fadeOutSamples; i++)
-        {
-            float factor = (float)i / fadeOutSamples;
-            int idx = samples.Length - 1 - i;
-            samples[idx] = (short)(samples[idx] * factor);
         }
     }
 

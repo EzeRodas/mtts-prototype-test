@@ -3,7 +3,6 @@ using System.Text;
 using System.Text.Json;
 using MoonTTS.Core.Services;
 using MoonTTS.Core.Utilities;
-using MoonTTS.Domain.Constants;
 using MoonTTS.Domain.Interfaces;
 using MoonTTS.Infrastructure.Daemon.DTOs;
 using MoonTTS.Infrastructure.Persistence;
@@ -16,7 +15,8 @@ namespace MoonTTS.Infrastructure.Daemon;
             DictionaryManager dictionaryManager, 
             SettingsManager settingsManager)
         - RunAsync(CancellationToken cancellationToken) : Task
-        - HandleClientAsync(Stream stream, CancellationToken cancellationToken) : Task
+        - HandleClientAsync(NamedPipeServerStream stream, CancellationToken cancellationToken) : Task
+        - CancelActiveSynthesis() : void
         - HandleSynthesizeAsync(Stream stream, DaemonRequest request, CancellationToken cancellationToken) : Task 
 */
 
@@ -28,9 +28,14 @@ public class DaemonServer
     private readonly DictionaryManager _dictionaryManager;
     private readonly SettingsManager _settingsManager;
 
-    private DateTime _lastActivityTime = DateTime.UtcNow;
-    private bool _stopRequested = false;
+    private readonly Lock _synthLock = new();
+    private readonly SemaphoreSlim _engineLock = new(1, 1);
+    private CancellationTokenSource? _activeSynthesisCts;
 
+    private DateTime _lastActivityTime = DateTime.UtcNow;
+    private volatile bool _stopRequested;
+
+    /* Initializes the background daemon server with engine provider, dictionary, and settings */
     public DaemonServer(
         ITtsEngineProvider engineProvider,
         DictionaryManager dictionaryManager,
@@ -41,6 +46,7 @@ public class DaemonServer
         _settingsManager = settingsManager;
     }
 
+    /* Runs the daemon named pipe accept loop and idle watchdog until killed or timed out */
     public async Task RunAsync(CancellationToken cancellationToken)
     {
         _lastActivityTime = DateTime.UtcNow;
@@ -63,12 +69,13 @@ public class DaemonServer
 
         while (!cancellationToken.IsCancellationRequested && !_stopRequested)
         {
+            NamedPipeServerStream? serverPipe = null;
             try
             {
-                await using var serverPipe = new NamedPipeServerStream(
+                serverPipe = new NamedPipeServerStream(
                     DaemonIpcProtocol.PipeName,
                     PipeDirection.InOut,
-                    1,
+                    NamedPipeServerStream.MaxAllowedServerInstances,
                     PipeTransmissionMode.Byte,
                     PipeOptions.Asynchronous);
 
@@ -82,150 +89,219 @@ public class DaemonServer
                 }
                 catch (OperationCanceledException)
                 {
+                    await serverPipe.DisposeAsync().ConfigureAwait(false);
                     continue;
                 }
 
-                await HandleClientAsync(serverPipe, cancellationToken);
+                NamedPipeServerStream acceptedPipe = serverPipe;
+                serverPipe = null;
+                _ = Task.Run(() => HandleClientAsync(acceptedPipe, cancellationToken), cancellationToken);
             }
             catch (Exception) when (_stopRequested || cancellationToken.IsCancellationRequested)
             {
+                if (serverPipe != null)
+                    await serverPipe.DisposeAsync().ConfigureAwait(false);
                 break;
             }
-            catch { /* Transient Pipe error */ }
+            catch
+            {
+                if (serverPipe != null)
+                    await serverPipe.DisposeAsync().ConfigureAwait(false);
+            }
         }
         timerCts.Cancel();
     }
 
-    /* Handle an individual client connection using binary protocol framing */
-    private async Task HandleClientAsync(Stream stream, CancellationToken cancellationToken)
+    /* Handles an individual client connection using binary protocol framing and disposes the pipe when done */
+    private async Task HandleClientAsync(NamedPipeServerStream stream, CancellationToken cancellationToken)
     {
-        (DaemonOpcode opcode, byte[] payload) frame;
-        try
+        await using (stream.ConfigureAwait(false))
         {
-            frame = await DaemonIpcProtocol.ReadFrameAsync(stream, cancellationToken).ConfigureAwait(false);
-        }
-        catch
-        {
-            return;
-        }
-
-        if (frame.opcode != DaemonOpcode.Request) return;
-
-        var request = JsonSerializer.Deserialize(frame.payload, AppJsonContext.Default.DaemonRequest);
-        if (request == null) return;
-
-        switch (request.Action)
-        {
-            case DaemonIpcProtocol.ActionKill:
+            (DaemonOpcode opcode, byte[] payload) frame;
+            try
             {
-                _stopRequested = true;
-                var response = new DaemonResponse { Success = true };
-                byte[] responseJson =
-                    JsonSerializer.SerializeToUtf8Bytes(response, AppJsonContext.Default.DaemonResponse);
-                await DaemonIpcProtocol.WriteFrameAsync(
-                    stream, 
-                    DaemonOpcode.Response, 
-                    responseJson, 
-                    cancellationToken).ConfigureAwait(false);
-                break;
+                frame = await DaemonIpcProtocol.ReadFrameAsync(stream, cancellationToken).ConfigureAwait(false);
             }
-            
-            case DaemonIpcProtocol.ActionStatus:
+            catch
             {
-                int elapsed = (int)(DateTime.UtcNow - _lastActivityTime).TotalSeconds;
-                var response = new DaemonResponse
+                return;
+            }
+
+            if (frame.opcode != DaemonOpcode.Request) return;
+
+            var request = JsonSerializer.Deserialize(frame.payload, AppJsonContext.Default.DaemonRequest);
+            if (request == null) return;
+
+            switch (request.Action)
+            {
+                case DaemonIpcProtocol.ActionKill:
                 {
-                    Success = true,
-                    ActiveModel = _settingsManager.CurrentAppConfig.ActiveModel.ToString(),
-                    IdleSecondsRemaining = Math.Max(0, (int)IdleTimeout.TotalSeconds - elapsed)
-                };
-                byte[] responseJson =
-                    JsonSerializer.SerializeToUtf8Bytes(response, AppJsonContext.Default.DaemonResponse);
-                await DaemonIpcProtocol.WriteFrameAsync(
-                        stream, 
-                        DaemonOpcode.Response, 
-                        responseJson, cancellationToken)
-                    .ConfigureAwait(false);
-                break;
-            }
-            
-            case DaemonIpcProtocol.ActionSynthesize:
+                    CancelActiveSynthesis();
+                    _stopRequested = true;
+                    var response = new DaemonResponse { Success = true };
+                    byte[] responseJson =
+                        JsonSerializer.SerializeToUtf8Bytes(response, AppJsonContext.Default.DaemonResponse);
+                    await DaemonIpcProtocol.WriteFrameAsync(
+                        stream,
+                        DaemonOpcode.Response,
+                        responseJson,
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+                }
+
+                case DaemonIpcProtocol.ActionStop:
+                {
+                    CancelActiveSynthesis();
+                    var response = new DaemonResponse { Success = true };
+                    byte[] responseJson =
+                        JsonSerializer.SerializeToUtf8Bytes(response, AppJsonContext.Default.DaemonResponse);
+                    await DaemonIpcProtocol.WriteFrameAsync(
+                        stream,
+                        DaemonOpcode.Response,
+                        responseJson,
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+                }
+
+                case DaemonIpcProtocol.ActionStatus:
+                {
+                    int elapsed = (int)(DateTime.UtcNow - _lastActivityTime).TotalSeconds;
+                    var response = new DaemonResponse
+                    {
+                        Success = true,
+                        ActiveModel = _settingsManager.CurrentAppConfig.ActiveModel.ToString(),
+                        IdleSecondsRemaining = Math.Max(0, (int)IdleTimeout.TotalSeconds - elapsed)
+                    };
+                    byte[] responseJson =
+                        JsonSerializer.SerializeToUtf8Bytes(response, AppJsonContext.Default.DaemonResponse);
+                    await DaemonIpcProtocol.WriteFrameAsync(
+                            stream,
+                            DaemonOpcode.Response,
+                            responseJson,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    break;
+                }
+
+                case DaemonIpcProtocol.ActionSynthesize:
                 default:
                     await HandleSynthesizeAsync(stream, request, cancellationToken).ConfigureAwait(false);
                     break;
+            }
         }
     }
 
+    /* Cancels any currently active synthesis job in the daemon */
+    private void CancelActiveSynthesis()
+    {
+        lock (_synthLock)
+        {
+            _activeSynthesisCts?.Cancel();
+        }
+    }
+
+    /* Reloads updated configs/dictionary, synthesizes sentences, and streams raw PCM chunks over IPC */
     public async Task HandleSynthesizeAsync(Stream stream, DaemonRequest request, CancellationToken cancellationToken)
     {
         _lastActivityTime = DateTime.UtcNow;
-        
-        _settingsManager.ReloadAppConfig();
-        var targetModel = _settingsManager.CurrentAppConfig.ActiveModel;
-        if (_engineProvider.CurrentModel != targetModel)
+
+        CancellationTokenSource synthCts;
+        lock (_synthLock)
         {
-            await _engineProvider.SetEngineAsync(targetModel, cancellationToken).ConfigureAwait(false);
+            _activeSynthesisCts?.Cancel();
+            _activeSynthesisCts?.Dispose();
+            _activeSynthesisCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            synthCts = _activeSynthesisCts;
         }
 
-        var engine = await _engineProvider.GetEngineAsync(cancellationToken).ConfigureAwait(false);
-        if (!engine.IsAvailable)
-        {
-            var failResponse = new DaemonResponse
-            {
-                Success = false,
-                ErrorMessage = "TTS Model not loaded or downloaded."
-            };
-            byte[] failJson = JsonSerializer.SerializeToUtf8Bytes(failResponse, AppJsonContext.Default.DaemonResponse);
-            await DaemonIpcProtocol.WriteFrameAsync(stream, DaemonOpcode.Response, failJson, cancellationToken)
-                .ConfigureAwait(false);
-            return;
-        }
-
-        var format = engine.OutputFormat;
-        var initialResponse = new DaemonResponse()
-        {
-            Success = true,
-            Format = format,
-            ActiveModel = targetModel.ToString()
-        };
-        byte[] initJson = JsonSerializer.SerializeToUtf8Bytes(initialResponse, AppJsonContext.Default.DaemonResponse);
-        await DaemonIpcProtocol.WriteFrameAsync(stream, DaemonOpcode.Response, initJson, cancellationToken)
-            .ConfigureAwait(false);
+        var linkedToken = synthCts.Token;
 
         try
         {
-            string processedText = _dictionaryManager.ReplaceText(request.Text);
-            var sentences = processedText.Length > AppConstants.MinSplittingLenght
-                ? TextSplitter.SplitIntoSentences(processedText)
-                : new List<string>() { processedText };
-
-            foreach (var sentence in sentences)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                await foreach (var chunk in
-                               engine.SynthesizeStreamAsync(sentence, request.Speed, cancellationToken)
-                                   .ConfigureAwait(false))
-                {
-                    await DaemonIpcProtocol
-                        .WriteFrameAsync(stream, DaemonOpcode.AudioChunk, chunk, cancellationToken)
-                        .ConfigureAwait(false);
-                }
-            }
-
-            await DaemonIpcProtocol
-                .WriteFrameAsync(stream, DaemonOpcode.AudioEnd, ReadOnlyMemory<byte>.Empty, cancellationToken)
-                .ConfigureAwait(false);
+            await _engineLock.WaitAsync(linkedToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
-            /* Client disconnected or cancelled */
+            return;
         }
-        catch (Exception ex)
+
+        try
         {
-            byte[] errorBytes = Encoding.UTF8.GetBytes(ex.Message);
-            await DaemonIpcProtocol
-                .WriteFrameAsync(stream, DaemonOpcode.Error, errorBytes, CancellationToken.None)
+            _settingsManager.ReloadAppConfig();
+            var targetModel = _settingsManager.CurrentAppConfig.ActiveModel;
+            if (_engineProvider.CurrentModel != targetModel)
+            {
+                await _engineProvider.SetEngineAsync(targetModel, linkedToken).ConfigureAwait(false);
+            }
+
+            var engine = await _engineProvider.GetEngineAsync(linkedToken).ConfigureAwait(false);
+            if (!engine.IsAvailable)
+            {
+                var failResponse = new DaemonResponse
+                {
+                    Success = false,
+                    ErrorMessage = "TTS Model not loaded or downloaded."
+                };
+                byte[] failJson = JsonSerializer.SerializeToUtf8Bytes(failResponse, AppJsonContext.Default.DaemonResponse);
+                await DaemonIpcProtocol.WriteFrameAsync(stream, DaemonOpcode.Response, failJson, linkedToken)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            var format = engine.OutputFormat;
+            var initialResponse = new DaemonResponse
+            {
+                Success = true,
+                Format = format,
+                ActiveModel = targetModel.ToString()
+            };
+            byte[] initJson = JsonSerializer.SerializeToUtf8Bytes(initialResponse, AppJsonContext.Default.DaemonResponse);
+            await DaemonIpcProtocol.WriteFrameAsync(stream, DaemonOpcode.Response, initJson, linkedToken)
                 .ConfigureAwait(false);
+
+            try
+            {
+                string processedText = _dictionaryManager.ReplaceText(request.Text);
+                var sentences = TextSplitter.SplitIntoSentences(processedText);
+
+                foreach (var sentence in sentences)
+                {
+                    linkedToken.ThrowIfCancellationRequested();
+                    await foreach (var chunk in
+                                   engine.SynthesizeStreamAsync(sentence, request.Speed, linkedToken)
+                                       .ConfigureAwait(false))
+                    {
+                        await DaemonIpcProtocol
+                            .WriteFrameAsync(stream, DaemonOpcode.AudioChunk, chunk, linkedToken)
+                            .ConfigureAwait(false);
+                    }
+                }
+
+                await DaemonIpcProtocol
+                    .WriteFrameAsync(stream, DaemonOpcode.AudioEnd, ReadOnlyMemory<byte>.Empty, linkedToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                /* Client disconnected or stopped */
+            }
+            catch (Exception ex)
+            {
+                byte[] errorBytes = Encoding.UTF8.GetBytes(ex.Message);
+                await DaemonIpcProtocol
+                    .WriteFrameAsync(stream, DaemonOpcode.Error, errorBytes, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            _engineLock.Release();
+            lock (_synthLock)
+            {
+                if (_activeSynthesisCts == synthCts)
+                    _activeSynthesisCts = null;
+            }
+            synthCts.Dispose();
         }
     }
 }

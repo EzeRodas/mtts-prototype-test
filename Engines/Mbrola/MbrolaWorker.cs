@@ -18,7 +18,6 @@ namespace MoonTTS.Engine.Mbrola;
         - RenderUtterance(string text, string voiceId, float speed, CancellationToken cancellationToken) : byte[]
         - OnSynthCallback(short* wav, int numSamples, IntPtr events) : int
         - ResamplePcm16(ReadOnlySpan<short> input, int sourceRate, int targetRate) : byte[]
-        - ApplyDeClickingInPlace(Span<byte> pcmBytes, int sampleRate) : void
         - SendAsync(EngineOpcode opcode, ReadOnlyMemory<byte> payload) : Task
         - SendJsonAsync<T>(EngineOpcode opcode, T message, JsonTypeInfo<T> typeInfo) : Task
         - SendErrorAsync(string code, string message) : Task
@@ -236,7 +235,7 @@ public sealed class MbrolaWorker : IDisposable
 
                 if (pcmBytes.Length > 0)
                 {
-                    ApplyDeClickingInPlace(pcmBytes, OutputSampleRate);
+                    AudioDsp.ApplyDeClickingInPlace(pcmBytes, OutputSampleRate);
                     await SendAsync(EngineOpcode.AudioChunk, pcmBytes);
                 }
             }
@@ -364,28 +363,6 @@ public sealed class MbrolaWorker : IDisposable
         }
 
         return outputBytes;
-    }
-
-    /* Smooths sample boundaries (3ms fade-in, 5ms fade-out) in-place to prevent speaker clicking */
-    private static void ApplyDeClickingInPlace(Span<byte> pcmBytes, int sampleRate)
-    {
-        if (pcmBytes.Length < 4) return;
-        Span<short> samples = MemoryMarshal.Cast<byte, short>(pcmBytes);
-
-        int fadeInSamples = Math.Min(sampleRate * 3 / 1000, samples.Length / 2);
-        for (int i = 0; i < fadeInSamples; i++)
-        {
-            float factor = (float)i / fadeInSamples;
-            samples[i] = (short)(samples[i] * factor);
-        }
-
-        int fadeOutSamples = Math.Min(sampleRate * 5 / 1000, samples.Length / 2);
-        for (int i = 0; i < fadeOutSamples; i++)
-        {
-            float factor = (float)i / fadeOutSamples;
-            int idx = samples.Length - 1 - i;
-            samples[idx] = (short)(samples[idx] * factor);
-        }
     }
 
     /* Writes one frame to stdout under the write lock */

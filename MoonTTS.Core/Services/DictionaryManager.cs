@@ -21,16 +21,21 @@ namespace MoonTTS.Core.Services;
 
 public class DictionaryManager
 {
-    /* Just in case */
     private const int MaxLength = 100;
 
-    /* Config repository */
-    private readonly IConfigurationRepository _repo;
+    /* Immutable snapshot swapped atomically on dictionary edits to ensure lock-free O(1) lookup */
+    private sealed record CompiledDictionary(
+        Regex? Pattern,
+        Dictionary<string, string> ExactReplacements,
+        Dictionary<string, string> IgnoreCaseReplacements);
 
-    /* Regex to be used for the text replacement */
-    private Regex? _cachedRegex;
-    private List<DictionaryEntry> _sortedLookUpCache = new();
+    private readonly IConfigurationRepository _repo;
+    private volatile CompiledDictionary _compiled = new(
+        null,
+        new Dictionary<string, string>(StringComparer.Ordinal),
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
     
+    /* Initializes the manager, subscribes to repository updates, and compiles the initial dictionary snapshot */
     public DictionaryManager(IConfigurationRepository repo)
     {
         _repo = repo;
@@ -87,11 +92,16 @@ public class DictionaryManager
         if (string.IsNullOrWhiteSpace(spelling))
             return Result.Failure("Replacement spelling cannot be empty.");
 
-        entry.Original = TrimString(original, MaxLength);
-        entry.Spelling = TrimString(spelling, MaxLength);
+        string trimmedOriginal = TrimString(original, MaxLength);
+        string trimmedSpelling = TrimString(spelling, MaxLength);
+
+        if (entries.Any(e => e.Id != id && string.Equals(e.Original, trimmedOriginal, StringComparison.OrdinalIgnoreCase)))
+            return Result.Failure($"Another entry for '{trimmedOriginal}' already exists.");
+
+        entry.Original = trimmedOriginal;
+        entry.Spelling = trimmedSpelling;
         entry.CaseSensitive = caseSensitive;
 
-        
         _repo.SaveDictionary(entries);
         return Result.Success();
     }
@@ -111,59 +121,78 @@ public class DictionaryManager
         return Result.Success();
     }
 
-    /* Main text replacement method */
+    /* Replaces matching dictionary terms in O(1) per match against an immutable compiled snapshot */
     public string ReplaceText(string input)
     {
-        /* If no entries then it does nothing */
-        if (string.IsNullOrWhiteSpace(input) || _cachedRegex == null || _repo.DictionaryEntries.Count == 0) 
+        CompiledDictionary snapshot = _compiled;
+        if (string.IsNullOrWhiteSpace(input) || snapshot.Pattern == null)
             return input;
 
-        return _cachedRegex.Replace(input, match =>
+        return snapshot.Pattern.Replace(input, match =>
         {
-            for (int i = 0; i < _sortedLookUpCache.Count; i++)
-            {
-                if (match.Groups[i + 1].Success)
-                {
-                    return _sortedLookUpCache[i].Spelling;
-                }
-            }
+            if (snapshot.ExactReplacements.TryGetValue(match.Value, out string? exact))
+                return exact;
+            if (snapshot.IgnoreCaseReplacements.TryGetValue(match.Value, out string? insensitive))
+                return insensitive;
             return match.Value;
         });
     }
 
-    /* Please don't make me explain how Regex works I barely understand it myself, but if you need it here are the docs
-       https://learn.microsoft.com/en-us/dotnet/api/system.text.regularexpressions.regex?view=net-10.0 */
+    /* Compiles non-capturing alternation rules sorted longest-first and atomically swaps the lookup snapshot */
     private void RebuildRegex()
     {
-        if (_repo.DictionaryEntries.Count == 0)
+        var rawEntries = _repo.DictionaryEntries;
+        if (rawEntries.Count == 0)
         {
-            _cachedRegex = null;
-            _sortedLookUpCache.Clear();
+            _compiled = new CompiledDictionary(
+                null,
+                new Dictionary<string, string>(StringComparer.Ordinal),
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
             return;
         }
-        
-        _sortedLookUpCache = _repo.DictionaryEntries.OrderByDescending(e  => e.Original.Length).ToList();
 
-        List<string> parts = new();
+        List<DictionaryEntry> ordered = rawEntries
+            .Where(e => !string.IsNullOrEmpty(e.Original))
+            .OrderByDescending(e => e.Original.Length)
+            .ToList();
 
-        /* In short It'll look for our custom entries and replace them for the new spellings if found */
-        for (int i = 0; i < _sortedLookUpCache.Count; i++)
+        if (ordered.Count == 0)
         {
-            var entry = _sortedLookUpCache[i];
-            string escaped = Regex.Escape(entry.Original);
-            
-            /* Only adds word boundary \b if the edge character is a letter / digit */
-            string prefix = char.IsLetterOrDigit(entry.Original[0]) ? @"\b" : "";
-            string suffix = char.IsLetterOrDigit(entry.Original[^1]) ? @"\b" : "";
-
-            string patternPart = $"({prefix}{escaped}{suffix})";
-            parts.Add(entry.CaseSensitive ? patternPart : $@"(?i:{patternPart})");
+            _compiled = new CompiledDictionary(
+                null,
+                new Dictionary<string, string>(StringComparer.Ordinal),
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+            return;
         }
-        
+
+        var parts = new List<string>(ordered.Count);
+        var exactMap = new Dictionary<string, string>(StringComparer.Ordinal);
+        var ignoreCaseMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var entry in ordered)
+        {
+            string escaped = Regex.Escape(entry.Original);
+
+            /* Only add word boundary \b if the edge character is a letter or digit */
+            string prefix = char.IsLetterOrDigit(entry.Original[0]) ? @"\b" : string.Empty;
+            string suffix = char.IsLetterOrDigit(entry.Original[^1]) ? @"\b" : string.Empty;
+
+            string core = $"(?:{prefix}{escaped}{suffix})";
+            if (entry.CaseSensitive)
+            {
+                parts.Add(core);
+                exactMap.TryAdd(entry.Original, entry.Spelling);
+            }
+            else
+            {
+                parts.Add($@"(?i:{core})");
+                ignoreCaseMap.TryAdd(entry.Original, entry.Spelling);
+            }
+        }
+
         string combinedPattern = string.Join("|", parts);
-        
-        /* Compiled flag makes it faster at run time */
-       _cachedRegex = new Regex(combinedPattern, RegexOptions.Compiled); 
+        var compiledRegex = new Regex(combinedPattern, RegexOptions.CultureInvariant);
+        _compiled = new CompiledDictionary(compiledRegex, exactMap, ignoreCaseMap);
     }
 
     /* If the string received goes over the limit gets trimmed, otherwise remains untouched */

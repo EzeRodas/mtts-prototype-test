@@ -10,7 +10,7 @@ namespace MoonTTS.Avalonia.Services;
 
 public class SingleInstanceService
 {
-    private const string PipeName = "Moon-TTS_SingleInstance_Pipe";
+    private static string PipeName => $"Moon-TTS_SingleInstance_Pipe_{Environment.UserName}";
     
     /* If there's an existing instance it just toggles its visibility */
     public static bool TrySendToggleToExistingInstance()

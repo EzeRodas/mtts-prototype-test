@@ -83,6 +83,13 @@ public class JsonConfigurationRepository : IConfigurationRepository
 
         string historyPath = Path.Combine("audio", "history", "history.json");
         HistoryEntries = LoadInternal(historyPath, AppJsonContext.Default.ListHistoryEntry) ?? new List<HistoryEntry>();
+
+        AppConfigChanged?.Invoke();
+        EngineConfigChanged?.Invoke();
+        DictionaryChanged?.Invoke();
+        ProfilesChanged?.Invoke();
+        HotkeysChanged?.Invoke();
+        HistoryChanged?.Invoke();
     }
 
     public void SaveAppConfig(AppConfig config)

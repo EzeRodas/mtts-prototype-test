@@ -1,4 +1,6 @@
 using System;
+using System.Threading;
+using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
@@ -48,6 +50,7 @@ public class WindowService : IWindowService
     private readonly ITtsEngineProvider _engineProvider;
     private readonly IWindowOverlayHelper _overlayHelper;
     private readonly ProfileManager? _profileManager;
+    private CancellationTokenSource? _posSaveDebounceCts;
 
     /* Initializes window service with main window, desktop lifetime, and settings */
     public WindowService(
@@ -144,18 +147,39 @@ public class WindowService : IWindowService
         }, DispatcherPriority.Background);
     }
     
-    /* Updates cached coordinate state and auto-persists when RememberPosition is enabled */ 
+    /* Updates cached coordinate state and debounces disk persistence when RememberPosition is enabled */ 
     private void OnMainWindowPositionChanged(object? sender, PixelPointEventArgs e)
     {
-        if (_mainWindow.IsVisible)
+        if (!_mainWindow.IsVisible)
+            return;
+
+        _lastPos = e.Point;
+        var config = _settingsManager.CurrentAppConfig;
+        if (!config.RememberPosition)
+            return;
+
+        config.PosX = e.Point.X;
+        config.PosY = e.Point.Y;
+
+        _posSaveDebounceCts?.Cancel();
+        _posSaveDebounceCts?.Dispose();
+        var cts = new CancellationTokenSource();
+        _posSaveDebounceCts = cts;
+        var token = cts.Token;
+
+        _ = Task.Run(async () =>
         {
-            _lastPos = e.Point;
-            var config = _settingsManager.CurrentAppConfig;
-            if (!config.RememberPosition) return;
-            config.PosX = e.Point.X;
-            config.PosY = e.Point.Y;
-            _settingsManager.SaveAppConfig(config);
-        }
+            try
+            {
+                await Task.Delay(300, token);
+                if (!token.IsCancellationRequested)
+                    _settingsManager.SaveAppConfig(config);
+            }
+            catch (OperationCanceledException)
+            {
+                /* Superseded by newer window drag position or application exit */
+            }
+        }, token);
     }
 
     /* Shows and activates the main window, focuses the input if visible but unfocused, or hides it if already focused */
@@ -263,6 +287,13 @@ public class WindowService : IWindowService
     /* Saves window coordinates and shuts down the desktop application */
     public void ExitApplication()
     {
+        _posSaveDebounceCts?.Cancel();
+        _posSaveDebounceCts?.Dispose();
+        _posSaveDebounceCts = null;
+
+        if (_settingsWindow?.DataContext is SettingsViewModel settingsVm)
+            settingsVm.FlushPendingSave();
+
         var config = _settingsManager.CurrentAppConfig;
         if (config.RememberPosition)
         {
@@ -346,6 +377,10 @@ public class WindowService : IWindowService
             _settingsWindow.SetOwnerWindow(_mainWindow);
             _settingsWindow.Deactivated += (_, _) => ScheduleDeactivationCheck();
         }
+        else if (_settingsWindow.DataContext is SettingsViewModel existingVm)
+        {
+            existingVm.LoadSettings();
+        }
 
         bool alwaysOnTop = _settingsManager.CurrentAppConfig.AlwaysOnTop;
         _settingsWindow.Topmost = alwaysOnTop;
@@ -361,12 +396,16 @@ public class WindowService : IWindowService
         _settingsWindow.Activate();
     }
     
-    /* Hides the settings window if currently visible */
+    /* Flushes pending settings and hides the settings window if currently visible */
     public void HideSettingsWindow()
     {
-        if (_settingsWindow != null && _settingsWindow.IsVisible)
+        if (_settingsWindow != null)
         {
-            _settingsWindow.Hide();
+            if (_settingsWindow.DataContext is SettingsViewModel vm)
+                vm.FlushPendingSave();
+
+            if (_settingsWindow.IsVisible)
+                _settingsWindow.Hide();
         }
     }
     

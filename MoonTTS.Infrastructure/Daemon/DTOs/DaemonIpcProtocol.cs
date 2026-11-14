@@ -10,9 +10,13 @@ public static class DaemonIpcProtocol
     /* Per user pipe name to prevent multi-user permission collissions on Linux / Windows */
     public static string PipeName => $"Moon-TTS_Daemon_{Environment.UserName}";
 
+    /* Per user pipe name for cross-process CLI pause/stop control during active playback */
+    public static string PlaybackControlPipeName => $"Moon-TTS_Playback_{Environment.UserName}";
+
     public const string ActionSynthesize = "synthesize";
     public const string ActionKill = "kill";
     public const string ActionStatus = "status";
+    public const string ActionStop = "stop";
 
     /* Frame layout */
     public const int HeaderSize = 5;

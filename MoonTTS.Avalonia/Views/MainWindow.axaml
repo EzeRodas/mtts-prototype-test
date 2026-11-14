@@ -52,6 +52,7 @@
                 >
                 <HyperlinkButton
                     Name="AboutBtn"
+                    AutomationProperties.Name="About Moon-TTS on GitHub"
                     NavigateUri="https://github.com/EzeRodas/Moon-TTS-CS"
                     Width="48" 
                     Height="48" 
@@ -104,6 +105,7 @@
             BorderThickness="0"
             Margin="0, 6, 0, 6"
             x:Name="DragBtn"
+            AutomationProperties.Name="Drag Window"
             PointerPressed="DragButton_PointerPressed"
             PointerReleased="DragButton_PointerReleased"
             BoxShadow="0 2 6 0 #30000000"
@@ -139,6 +141,7 @@
                 Cursor="Hand"
                 Margin="0, 6, 0, 6"
                 x:Name="SettingsBtn"
+                AutomationProperties.Name="Open Settings"
                 Command="{Binding ToggleSettingsCommand}"
                 >
                 
@@ -173,6 +176,7 @@
                 <TextBox 
                     Text="{Binding TextToSpeak, Mode=TwoWay}"
                     x:Name="InputBox"
+                    AutomationProperties.Name="Text to synthesize"
                     PlaceholderText="Insert text to synthesize" 
                     CornerRadius="100" 
                     Padding="20,0,20,0"
@@ -208,6 +212,7 @@
                     HorizontalContentAlignment="Center"
                     VerticalContentAlignment="Center"
                     x:Name="PauseBtn"
+                    AutomationProperties.Name="Pause or Resume Playback"
                     Command="{Binding PauseResumeCommand}"
                     Cursor="Hand"
                 >
@@ -250,6 +255,8 @@
                     Classes="StopBtn"
                     Cursor="Hand"
                     Background="#f66"
+                    x:Name="StopBtn"
+                    AutomationProperties.Name="Stop Playback"
                     Command="{Binding StopCommand}"
                 >
                     <Path
@@ -308,6 +315,8 @@
                 HorizontalContentAlignment="Center"
                 VerticalContentAlignment="Center"
                 Cursor="Hand"
+                x:Name="PlayBtn"
+                AutomationProperties.Name="Speak Text"
                 Command="{Binding PlayCommand}"
             >
                 <Path
@@ -343,6 +352,7 @@
                 VerticalContentAlignment="Center"
                 Cursor="Hand"
                 Classes="CloseBtn"
+                AutomationProperties.Name="Hide Window"
                 Command="{Binding CloseAppCommand}"
             >
                 <Path

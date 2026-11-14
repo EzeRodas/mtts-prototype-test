@@ -1,6 +1,7 @@
 using System;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -30,6 +31,7 @@ namespace MoonTTS.Avalonia.ViewModels;
         - SwitchModelAsync(ModelMetadata model) : Task
         - RevertModelSelectionAsync(bool navigateToEngineManagement) : Task
         - AutoSave() : void
+        - FlushPendingSave() : void
         - SwitchToAdvanced() : void
         - SwitchToQuick() : void
         - SelectTab(AdvancedTab) : void
@@ -41,6 +43,7 @@ namespace MoonTTS.Avalonia.ViewModels;
         - CancelAddProfile() : void
         - DeleteProfile() : void
         - AddHotkeyPhraseAsync() : Task
+        - PlayHotkeyPhraseAsync(Guid) : Task
         - DeleteHotkeyPhrase(Guid) : void
         - PlayHistoryItemAsync(Guid) : Task
         - ClearHistory() : void
@@ -149,6 +152,10 @@ public partial class SettingsViewModel : ViewModelBase
     private readonly ProfileManager? _profileManager;
 
     private bool _isLoading;
+    private readonly Lock _saveLock = new();
+    private CancellationTokenSource? _saveDebounceCts;
+    private bool _hasPendingSave;
+    private ModelId? _pendingEngineModel;
 
     /* View Mode & Active Tab */
     [ObservableProperty]
@@ -299,7 +306,6 @@ public partial class SettingsViewModel : ViewModelBase
 
         if (_settingsManager != null && _audioPlayer != null)
         {
-            LoadAudioDevices();
             LoadTtsEngines();
             LoadModelStatuses();
             LoadSettings();
@@ -492,7 +498,7 @@ public partial class SettingsViewModel : ViewModelBase
         }
     }
 
-    /* Loads all configuration values and binds selection items */
+    /* Loads all configuration values and refreshes audio output devices for hot-plugged hardware */
     public void LoadSettings()
     {
         if (_settingsManager == null)
@@ -501,6 +507,8 @@ public partial class SettingsViewModel : ViewModelBase
         _isLoading = true;
         try
         {
+            LoadAudioDevices();
+
             var appConfig = _settingsManager.CurrentAppConfig;
             SelectedModel = AvailableModels.FirstOrDefault(m => m.Id == appConfig.ActiveModel) ?? ModelMetadata.Unselected;
             var engineConfig = !SelectedModel.IsUnselected
@@ -686,23 +694,9 @@ public partial class SettingsViewModel : ViewModelBase
             NavigateToEngineManagement();
     }
 
-    partial void OnSelectedVoiceChanged(VoiceInfo? value)
-    {
-        if (!_isLoading && _engineProvider != null && value != null)
-        {
-            _engineProvider.CurrentEngine.ActiveVoice = value.Id;
-        }
-        AutoSave();
-    }
+    partial void OnSelectedVoiceChanged(VoiceInfo? value) => AutoSave();
 
-    partial void OnSpeechSpeedChanged(float value)
-    {
-        if (!_isLoading && _engineProvider != null)
-        {
-            _engineProvider.CurrentEngine.Speed = value;
-        }
-        AutoSave();
-    }
+    partial void OnSpeechSpeedChanged(float value) => AutoSave();
 
     partial void OnToggleAppHotkeyChanged(string value)
     {
@@ -784,48 +778,99 @@ public partial class SettingsViewModel : ViewModelBase
 
     partial void OnCustomModelsDirectoryChanged(string value) => AutoSave();
 
-    /* Persists active settings immediately to disk and applies audio changes */
+    /* Applies changes immediately in memory and audio output, while debouncing disk persistence by 250ms */
     private void AutoSave()
     {
         if (_isLoading || _settingsManager == null || _audioPlayer == null)
             return;
 
-        var appConfig = _settingsManager.CurrentAppConfig;
-        appConfig.ActiveModel = SelectedModel?.Id ?? ModelId.Unselected;
-        appConfig.EnablePrimaryPlayback = EnablePrimaryPlayback;
-        appConfig.PrimaryAudioDeviceId = SelectedPrimaryDevice?.DeviceId ?? "-1";
-        appConfig.PrimaryVolume = PrimaryVolume;
+        ModelId? dirtyEngineModel = null;
+        CancellationToken token;
 
-        appConfig.EnableMonitorPlayback = EnableMonitorPlayback;
-        appConfig.MonitorAudioDeviceId = SelectedMonitorDevice?.DeviceId ?? "-1";
-        appConfig.MonitorVolume = MonitorVolume;
-
-        appConfig.DefaultMonitor = SelectedMonitorIndex;
-        appConfig.OpenOnStartup = OpenOnStartup;
-        appConfig.AlwaysOnTop = AlwaysOnTop;
-        appConfig.HideOnSynth = HideOnSynth;
-        appConfig.RememberPosition = RememberPosition;
-        appConfig.CreateMicOnStartup = CreateMicOnStartup;
-        appConfig.CustomModelsDirectory = string.IsNullOrWhiteSpace(CustomModelsDirectory)
-            ? null
-            : CustomModelsDirectory.Trim();
-
-        _settingsManager.SaveAppConfig(appConfig);
-
-        /* Voice and speed are remembered per model; Unselected has no engine settings */
-        if (SelectedModel != null && !SelectedModel.IsUnselected)
+        lock (_saveLock)
         {
-            var engineConfig = _settingsManager.GetEngineConfig(SelectedModel.Id);
-            engineConfig.VoiceId = SelectedVoice?.Id ?? engineConfig.VoiceId;
-            engineConfig.Speed = SpeechSpeed;
-            _settingsManager.SaveEngineConfig(SelectedModel.Id, engineConfig);
+            var appConfig = _settingsManager.CurrentAppConfig;
+            appConfig.ActiveModel = SelectedModel?.Id ?? ModelId.Unselected;
+            appConfig.EnablePrimaryPlayback = EnablePrimaryPlayback;
+            appConfig.PrimaryAudioDeviceId = SelectedPrimaryDevice?.DeviceId ?? "-1";
+            appConfig.PrimaryVolume = PrimaryVolume;
+
+            appConfig.EnableMonitorPlayback = EnableMonitorPlayback;
+            appConfig.MonitorAudioDeviceId = SelectedMonitorDevice?.DeviceId ?? "-1";
+            appConfig.MonitorVolume = MonitorVolume;
+
+            appConfig.DefaultMonitor = SelectedMonitorIndex;
+            appConfig.OpenOnStartup = OpenOnStartup;
+            appConfig.AlwaysOnTop = AlwaysOnTop;
+            appConfig.HideOnSynth = HideOnSynth;
+            appConfig.RememberPosition = RememberPosition;
+            appConfig.CreateMicOnStartup = CreateMicOnStartup;
+            appConfig.CustomModelsDirectory = string.IsNullOrWhiteSpace(CustomModelsDirectory)
+                ? null
+                : CustomModelsDirectory.Trim();
+
+            if (SelectedModel != null && !SelectedModel.IsUnselected)
+            {
+                var engineConfig = _settingsManager.GetEngineConfig(SelectedModel.Id);
+                engineConfig.VoiceId = SelectedVoice?.Id ?? engineConfig.VoiceId;
+                engineConfig.Speed = SpeechSpeed;
+                dirtyEngineModel = SelectedModel.Id;
+            }
+
+            _audioPlayer.SetOutputDevices(
+                appConfig.PrimaryAudioDeviceId,
+                appConfig.MonitorAudioDeviceId
+            );
+            _audioPlayer.SetVolume(appConfig.PrimaryVolume, appConfig.MonitorVolume);
+
+            _hasPendingSave = true;
+            if (dirtyEngineModel.HasValue)
+                _pendingEngineModel = dirtyEngineModel;
+
+            _saveDebounceCts?.Cancel();
+            _saveDebounceCts?.Dispose();
+            _saveDebounceCts = new CancellationTokenSource();
+            token = _saveDebounceCts.Token;
         }
 
-        _audioPlayer.SetOutputDevices(
-            appConfig.PrimaryAudioDeviceId,
-            appConfig.MonitorAudioDeviceId
-        );
-        _audioPlayer.SetVolume(appConfig.PrimaryVolume, appConfig.MonitorVolume);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(250, token);
+                if (!token.IsCancellationRequested)
+                    FlushPendingSave();
+            }
+            catch (OperationCanceledException)
+            {
+                /* Superseded by newer slider tick or explicit flush */
+            }
+        }, token);
+    }
+
+    /* Immediately persists any debounced application and engine configuration changes to disk */
+    public void FlushPendingSave()
+    {
+        if (_settingsManager == null)
+            return;
+
+        ModelId? modelToSave;
+        lock (_saveLock)
+        {
+            if (!_hasPendingSave)
+                return;
+
+            _hasPendingSave = false;
+            modelToSave = _pendingEngineModel;
+            _pendingEngineModel = null;
+            _saveDebounceCts?.Cancel();
+        }
+
+        _settingsManager.SaveAppConfig(_settingsManager.CurrentAppConfig);
+        if (modelToSave.HasValue && !modelToSave.Value.IsUnselected)
+        {
+            _settingsManager.SaveEngineConfig(modelToSave.Value, _settingsManager.GetEngineConfig(modelToSave.Value));
+        }
     }
 
     /* Handles applying the recorded hotkey combination */
@@ -1096,6 +1141,18 @@ public partial class SettingsViewModel : ViewModelBase
         }
     }
 
+    /* Plays pre-rendered audio for an existing hotkey phrase preview */
+    [RelayCommand]
+    private async Task PlayHotkeyPhraseAsync(Guid id)
+    {
+        if (_hotkeyManager == null)
+            return;
+
+        var res = await _hotkeyManager.PlayHotkeyAsync(id);
+        if (res.IsFailure && res.ErrorMessage != SpeechPipeline.CancelledMessage)
+            ShowModelStatusAsync(res.ErrorMessage ?? "Failed to play hotkey phrase.");
+    }
+
     [RelayCommand]
     private void DeleteHotkeyPhrase(Guid id)
     {
@@ -1153,7 +1210,7 @@ public partial class SettingsViewModel : ViewModelBase
         item.IsDownloading = true;
         try
         {
-            var progress = new Progress<double>(p => item.Progress = p * 100);
+            var progress = new Progress<double>(p => item.Progress = p);
             var result = await _downloadManager.DownloadModelAsync(item.Model, progress);
             item.IsDownloaded = result.IsSuccess;
             if (result.IsSuccess)

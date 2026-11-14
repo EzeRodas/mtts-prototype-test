@@ -12,15 +12,16 @@ namespace MoonTTS.Core.Services;
 /* File Structure:
         - HistoryManager(IAudioPlayer audioPlayer, IConfigurationRepository repo)
         - GetHistory() : IReadOnlyList<HistoryEntry>
-        - FindMatchingEntry(string text, ModelId model, string voice) : HistoryEntry?
-        - AddEntry(string text, byte[] wavData, ModelId model, string voice) : Task<Result>
+        - FindMatchingEntry(string rawText, string processedText, ModelId model, string voice, float speed) : HistoryEntry?
+        - AddEntry(string text, byte[] wavData, ModelId model, string voice, string processedText, float speed) : Task<Result>
         - PlayEntryAsync(Guid id, CancellationToken cancellationToken) : Task<Result>
+        - PlayEntryWithInfoAsync(Guid id, CancellationToken cancellationToken) : Task<Result<(TimeSpan Duration, int PcmBytes)>>
         - Pause() : void
         - Resume() : void
         - Stop() : void
         - DeleteEntry(Guid id) : Task<Result>
         - ClearHistory() : Task<Result>
-        - GetWavPath(Guid id) : string
+        - ResolveEntryWavPath(HistoryEntry entry) : string
 */
 
 public class HistoryManager
@@ -28,8 +29,14 @@ public class HistoryManager
     private readonly IConfigurationRepository _repo;
     private readonly IAudioPlayer _audioPlayer;
     private readonly string _historyDirectory;
+    private readonly Lock _playbackLock = new();
+    private CancellationTokenSource? _activePlaybackCts;
+
+    public bool IsPlaying { get; private set; }
+    public bool IsPaused { get; private set; }
 
     public event Action? OnHistoryChanged;
+    public event Action? OnPlaybackStateChanged;
 
     /* Initializes history manager, sets up storage directory, and loads cached history */
     public HistoryManager(IAudioPlayer audioPlayer, IConfigurationRepository repo)
@@ -45,22 +52,43 @@ public class HistoryManager
     /* Returns a copy of the current speech history entries */
     public IReadOnlyList<HistoryEntry> GetHistory() => _repo.HistoryEntries.ToList();
 
-    /* Returns the most recent entry generated from exactly this text, model and voice whose audio file still
-       exists, or null. Unselected models and empty voices never match */
-    public HistoryEntry? FindMatchingEntry(string text, ModelId model, string voice)
+    /* Returns the most recent entry generated from matching raw text, processed text, model, voice and speed */
+    public HistoryEntry? FindMatchingEntry(
+        string rawText,
+        string processedText,
+        ModelId model,
+        string voice,
+        float speed = 1.0f)
     {
         if (model.IsUnselected || string.IsNullOrEmpty(voice))
             return null;
 
+        float targetSpeed = speed > 0 ? speed : 1.0f;
+
         return _repo.HistoryEntries.FirstOrDefault(h =>
-            h.Model == model
-            && h.Voice == voice
-            && string.Equals(h.Text, text, StringComparison.Ordinal)
-            && File.Exists(Path.Combine(_historyDirectory, h.WavFileName)));
+        {
+            if (h.Model != model || h.Voice != voice)
+                return false;
+
+            float entrySpeed = h.Speed > 0 ? h.Speed : 1.0f;
+            if (Math.Abs(entrySpeed - targetSpeed) >= 0.01f)
+                return false;
+
+            string entryProcessed = string.IsNullOrEmpty(h.ProcessedText) ? h.Text : h.ProcessedText;
+            return string.Equals(h.Text, rawText, StringComparison.Ordinal)
+                   && string.Equals(entryProcessed, processedText, StringComparison.Ordinal)
+                   && File.Exists(ResolveEntryWavPath(h));
+        });
     }
 
-    /* Stores the full text with the model and voice that produced the audio, so it can be recalled and replayed */
-    public async Task<Result> AddEntry(string text, byte[] wavData, ModelId model = default, string voice = "")
+    /* Stores the full text with the model, voice, processed text and speed that produced the audio */
+    public async Task<Result> AddEntry(
+        string text,
+        byte[] wavData,
+        ModelId model = default,
+        string voice = "",
+        string processedText = "",
+        float speed = 1.0f)
     {
         Guid newId = Guid.NewGuid();
         string fileName = $"tts_output_{newId}.wav";
@@ -75,7 +103,9 @@ public class HistoryManager
             CreatedAt = DateTime.Now,
             WavFileName = fileName,
             Model = model,
-            Voice = voice
+            Voice = voice,
+            ProcessedText = string.IsNullOrEmpty(processedText) ? text : processedText,
+            Speed = speed > 0 ? speed : 1.0f
         };
 
         /* Recovers the list and adds it at the top */
@@ -88,7 +118,7 @@ public class HistoryManager
             var toRemove = entries.Last();
             entries.RemoveAt(entries.Count - 1);
 
-            string oldWavPath = Path.Combine(_historyDirectory, toRemove.WavFileName);
+            string oldWavPath = ResolveEntryWavPath(toRemove);
             if (File.Exists(oldWavPath))
             {
                 try { File.Delete(oldWavPath); } catch { /* Ignores file locks */ }
@@ -101,29 +131,53 @@ public class HistoryManager
     
     /* Audio Controls */
 
-    /* Play file from the history */
+    /* Plays a history audio file and returns simple success or failure */
     public async Task<Result> PlayEntryAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        var result = await PlayEntryWithInfoAsync(id, cancellationToken);
+        return result.IsSuccess
+            ? Result.Success()
+            : Result.Failure(result.ErrorMessage ?? "Failed to play history entry.", result.Exception);
+    }
+
+    /* Plays a history audio file and reports its parsed audio duration and PCM byte count */
+    public async Task<Result<(TimeSpan Duration, int PcmBytes)>> PlayEntryWithInfoAsync(
+        Guid id,
+        CancellationToken cancellationToken = default)
     {
         var entry = _repo.HistoryEntries.FirstOrDefault(h => h.Id == id);
         if (entry == null)
-            return Result.Failure($"History entry was not found.");
+            return Result<(TimeSpan, int)>.Failure("History entry was not found.");
         
-        /* Gets the file path */
-        string wavPath = Path.Combine(_historyDirectory, entry.WavFileName);
+        string wavPath = ResolveEntryWavPath(entry);
         if (!File.Exists(wavPath))
-            return Result.Failure("Audio file not found or missing from disk.");
+            return Result<(TimeSpan, int)>.Failure("Audio file not found or missing from disk.");
 
         var config = _repo.AppConfig;
-        if (!config.EnablePrimaryPlayback && !config.EnableMonitorPlayback) return Result.Success();
+        if (!config.EnablePrimaryPlayback && !config.EnableMonitorPlayback)
+            return Result<(TimeSpan, int)>.Success((TimeSpan.Zero, 0));
+
+        CancellationTokenSource playbackCts;
+        lock (_playbackLock)
+        {
+            _activePlaybackCts?.Cancel();
+            _activePlaybackCts?.Dispose();
+            _activePlaybackCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            playbackCts = _activePlaybackCts;
+            IsPlaying = true;
+            IsPaused = false;
+        }
+        OnPlaybackStateChanged?.Invoke();
+
+        var token = playbackCts.Token;
 
         try
         {
-            /* Reproduces and listens for cancellation token */
-            byte[] audioBytes = await File.ReadAllBytesAsync(wavPath, cancellationToken);
-
+            byte[] audioBytes = await File.ReadAllBytesAsync(wavPath, token);
             AudioFormat format = FormatReader.GetFormatFromWavHeader(audioBytes);
-
-            ReadOnlyMemory<byte> pcm = audioBytes.Length > 44 ? audioBytes.AsMemory(44) : audioBytes;
+            ReadOnlyMemory<byte> pcm = audioBytes.Length > WavWriter.HeaderSize
+                ? audioBytes.AsMemory(WavWriter.HeaderSize)
+                : audioBytes;
             
             string? primaryId = config.EnablePrimaryPlayback ? config.PrimaryAudioDeviceId : null;
             string? monitorId = config.EnableMonitorPlayback ? config.MonitorAudioDeviceId : null;
@@ -131,22 +185,78 @@ public class HistoryManager
             _audioPlayer.SetOutputDevices(primaryId, monitorId);
             _audioPlayer.SetVolume(config.PrimaryVolume, config.MonitorVolume);
             
-            return await _audioPlayer.PlayPcmAsync(pcm, format, cancellationToken);
+            var playResult = await _audioPlayer.PlayPcmAsync(pcm, format, token);
+            if (playResult.IsFailure)
+                return Result<(TimeSpan, int)>.Failure(playResult.ErrorMessage ?? "Playback failed.", playResult.Exception);
+
+            return Result<(TimeSpan, int)>.Success((format.GetDuration(pcm.Length), pcm.Length));
         }
         catch (OperationCanceledException)
         {
-            return  Result.Failure($"History playback was canceled.");
+            _audioPlayer.Stop();
+            return Result<(TimeSpan, int)>.Failure("History playback was canceled.");
         }
         catch (Exception ex)
         {
-            return Result.Failure($"Failed to play history entry: {ex.Message}", ex);
+            _audioPlayer.Stop();
+            return Result<(TimeSpan, int)>.Failure($"Failed to play history entry: {ex.Message}", ex);
+        }
+        finally
+        {
+            bool changed = false;
+            lock (_playbackLock)
+            {
+                if (_activePlaybackCts == playbackCts)
+                {
+                    _activePlaybackCts = null;
+                    IsPlaying = false;
+                    IsPaused = false;
+                    changed = true;
+                }
+            }
+            playbackCts.Dispose();
+            if (changed)
+                OnPlaybackStateChanged?.Invoke();
         }
     }
     
-    /* Once the audio player has been initiated, we can just use the methods defined in its corresponding OS player */
-    public void Pause() =>  _audioPlayer.Pause();
-    public void Resume() =>  _audioPlayer.Resume();
-    public void Stop() =>  _audioPlayer.Stop();
+    /* Pauses active history playback */
+    public void Pause()
+    {
+        if (!IsPlaying) return;
+        _audioPlayer.Pause();
+        IsPaused = true;
+        OnPlaybackStateChanged?.Invoke();
+    }
+
+    /* Resumes paused history playback */
+    public void Resume()
+    {
+        if (!IsPlaying) return;
+        _audioPlayer.Resume();
+        IsPaused = false;
+        OnPlaybackStateChanged?.Invoke();
+    }
+
+    /* Cancels active history playback and notifies state observers */
+    public void Stop()
+    {
+        bool wasPlaying;
+        lock (_playbackLock)
+        {
+            wasPlaying = IsPlaying;
+            _activePlaybackCts?.Cancel();
+            _activePlaybackCts?.Dispose();
+            _activePlaybackCts = null;
+            IsPlaying = false;
+            IsPaused = false;
+        }
+        if (wasPlaying)
+        {
+            _audioPlayer.Stop();
+            OnPlaybackStateChanged?.Invoke();
+        }
+    }
     
     /* Management */
 
@@ -161,13 +271,12 @@ public class HistoryManager
         if (historyEntry == null)
             return Result.Failure($"History entry with ID {id} was not found.");
         
-        
         entriesList.Remove(historyEntry);
 
-        string path = GetWavPath(id);
+        string path = ResolveEntryWavPath(historyEntry);
         if (File.Exists(path))
         {
-            try {File.Delete(path);} catch { /* Ignore file lock */ }
+            try { File.Delete(path); } catch { /* Ignore file lock */ }
         }
         
         _repo.SaveHistory(entriesList);
@@ -182,10 +291,10 @@ public class HistoryManager
         {
             foreach (var historyEntry in entriesList)
             {
-                string path = GetWavPath(historyEntry.Id);
+                string path = ResolveEntryWavPath(historyEntry);
                 if (File.Exists(path))
                 {
-                    try {File.Delete(path);} catch { /* Ignore file lock */ }
+                    try { File.Delete(path); } catch { /* Ignore file lock */ }
                 }
             }
             
@@ -201,7 +310,12 @@ public class HistoryManager
     
     /* Persistence */
     
-    /* Returns the path of the file with matching Guid */
-    private string GetWavPath(Guid id) => Path.Combine(_historyDirectory, $"tts_output_{id}.wav");
-    
+    /* Resolves the path of the WAV file stored on the history entry, falling back to legacy ID naming */
+    private string ResolveEntryWavPath(HistoryEntry entry)
+    {
+        string fileName = string.IsNullOrWhiteSpace(entry.WavFileName)
+            ? $"tts_output_{entry.Id}.wav"
+            : entry.WavFileName;
+        return Path.Combine(_historyDirectory, fileName);
+    }
 }

@@ -82,6 +82,7 @@
                     
                     <Panel Grid.Column="1" Margin="0,0,6,0">
                         <Button Name="SwitchAdvancedBtn" Classes="btn-icon"
+                                AutomationProperties.Name="Switch Settings Mode"
                                 Command="{Binding SwitchToAdvancedCommand}">
                             <Path Data="M16 4h4v4 M14 10l6-6 M8 20H4v-4 M4 20l6-6 M16 20h4v-4 M14 14l6 6 M8 4H4v4 M4 4l6 6"
                                   Stroke="{StaticResource TextSecondaryBrush}" StrokeThickness="2" Width="14" Height="14" Stretch="Uniform"/>
@@ -99,6 +100,7 @@
 
                     <Panel Grid.Column="2">
                         <Button Name="CloseSettingsBtn" Classes="btn-icon"
+                                AutomationProperties.Name="Close Settings"
                                 Command="{Binding CloseCommand}">
                             <Path Data="M18 6l-12 12 M6 6l12 12" Stroke="{StaticResource TextSecondaryBrush}" StrokeThickness="2" Width="12" Height="12" Stretch="Uniform"/>
                         </Button>
@@ -123,6 +125,7 @@
                                 <TextBlock Text="Model" Classes="field-label" VerticalAlignment="Center"/>
                                 <Panel VerticalAlignment="Center">
                                     <Button Name="QuickInfoBtn" Classes="btn-info"
+                                            AutomationProperties.Name="Engine Management Information"
                                             Command="{Binding NavigateToEngineManagementCommand}">
                                         <Path Data="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z M12 16v-4 M12 8h.01"
                                               Stroke="{StaticResource TextMutedBrush}" StrokeThickness="1.8"
@@ -382,7 +385,7 @@
                                                 <TextBlock Text="{Binding Original}" VerticalAlignment="Center"/>
                                                 <TextBlock Grid.Column="1" Text="{Binding Spelling}" Foreground="{StaticResource PrimaryBrush}" VerticalAlignment="Center"/>
                                                 <Panel Grid.Column="2">
-                                                    <Button Name="DeleteDictBtn" Content="✕" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).DeleteDictionaryEntryCommand}" CommandParameter="{Binding Id}" Classes="btn-icon btn-delete"/>
+                                                    <Button Name="DeleteDictBtn" AutomationProperties.Name="Delete Dictionary Entry" Content="✕" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).DeleteDictionaryEntryCommand}" CommandParameter="{Binding Id}" Classes="btn-icon btn-delete"/>
                                                     <Popup IsOpen="{Binding IsPointerOver, ElementName=DeleteDictBtn}"
                                                            PlacementTarget="{Binding ElementName=DeleteDictBtn}"
                                                            Placement="Top"
@@ -406,6 +409,7 @@
                                     <TextBlock Text="Active Model" Classes="field-label" VerticalAlignment="Center"/>
                                     <Panel VerticalAlignment="Center">
                                         <Button Name="AdvancedInfoBtn" Classes="btn-info"
+                                                AutomationProperties.Name="Engine Management Information"
                                                 Command="{Binding NavigateToEngineManagementCommand}">
                                             <Path Data="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z M12 16v-4 M12 8h.01"
                                                   Stroke="{StaticResource TextMutedBrush}" StrokeThickness="1.8"
@@ -671,11 +675,28 @@
                                 <ListBox ItemsSource="{Binding HotkeyEntries}" Height="180" Classes="data-list">
                                     <ListBox.ItemTemplate>
                                         <DataTemplate x:DataType="entities:HotkeyEntry">
-                                            <Grid ColumnDefinitions="120,*,Auto">
+                                            <Grid ColumnDefinitions="120,*,Auto,Auto">
                                                 <TextBlock Text="{Binding Hotkey}" FontWeight="Bold" VerticalAlignment="Center"/>
                                                 <TextBlock Grid.Column="1" Text="{Binding Text}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
-                                                <Panel Grid.Column="2">
-                                                    <Button Name="DeleteHotkeyBtn" Content="✕" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).DeleteHotkeyPhraseCommand}"
+                                                <Panel Grid.Column="2" Margin="0,0,4,0">
+                                                    <Button Name="PlayHotkeyBtn" Content="▶"
+                                                            AutomationProperties.Name="Play Hotkey Phrase"
+                                                            Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).PlayHotkeyPhraseCommand}"
+                                                            CommandParameter="{Binding Id}" Classes="btn-icon"/>
+                                                    <Popup IsOpen="{Binding IsPointerOver, ElementName=PlayHotkeyBtn}"
+                                                           PlacementTarget="{Binding ElementName=PlayHotkeyBtn}"
+                                                           Placement="Top"
+                                                           VerticalOffset="-4"
+                                                           IsLightDismissEnabled="False">
+                                                        <Border Classes="tooltip-popup">
+                                                            <TextBlock Text="Play" Classes="tooltip-popup-text"/>
+                                                        </Border>
+                                                    </Popup>
+                                                </Panel>
+                                                <Panel Grid.Column="3">
+                                                    <Button Name="DeleteHotkeyBtn" Content="✕"
+                                                            AutomationProperties.Name="Delete Hotkey"
+                                                            Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).DeleteHotkeyPhraseCommand}"
                                                             CommandParameter="{Binding Id}" Classes="btn-icon btn-delete"/>
                                                     <Popup IsOpen="{Binding IsPointerOver, ElementName=DeleteHotkeyBtn}"
                                                            PlacementTarget="{Binding ElementName=DeleteHotkeyBtn}"
@@ -706,7 +727,7 @@
                                             <Grid ColumnDefinitions="*,Auto,Auto">
                                                 <TextBlock Text="{Binding Text}" TextTrimming="CharacterEllipsis" MaxLines="1" VerticalAlignment="Center"/>
                                                 <Panel Grid.Column="1" Margin="4,0">
-                                                    <Button Name="PlayHistoryBtn" Content="▶" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).PlayHistoryItemCommand}" CommandParameter="{Binding Id}" Classes="btn-icon"/>
+                                                    <Button Name="PlayHistoryBtn" AutomationProperties.Name="Play History Entry" Content="▶" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).PlayHistoryItemCommand}" CommandParameter="{Binding Id}" Classes="btn-icon"/>
                                                     <Popup IsOpen="{Binding IsPointerOver, ElementName=PlayHistoryBtn}"
                                                            PlacementTarget="{Binding ElementName=PlayHistoryBtn}"
                                                            Placement="Top"
@@ -718,7 +739,7 @@
                                                     </Popup>
                                                 </Panel>
                                                 <Panel Grid.Column="2">
-                                                    <Button Name="DeleteHistoryBtn" Content="✕" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).DeleteHistoryItemCommand}" CommandParameter="{Binding Id}" Classes="btn-icon btn-delete"/>
+                                                    <Button Name="DeleteHistoryBtn" AutomationProperties.Name="Delete History Entry" Content="✕" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).DeleteHistoryItemCommand}" CommandParameter="{Binding Id}" Classes="btn-icon btn-delete"/>
                                                     <Popup IsOpen="{Binding IsPointerOver, ElementName=DeleteHistoryBtn}"
                                                            PlacementTarget="{Binding ElementName=DeleteHistoryBtn}"
                                                            Placement="Top"

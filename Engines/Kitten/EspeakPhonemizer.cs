@@ -8,9 +8,12 @@ namespace MoonTTS.Engine.Kitten;
 /* File Structure:
         - EnsureInitialized() : void
         - Phonemize(string text) : string
+        - PhonemizeClause(string clause, StringBuilder sb) : void
         - Tokenize(string phonemizedText) : long[]
         - ResolveLibrary(string libraryName, Assembly assembly, DllImportSearchPath? searchPath) : IntPtr
-        - CleanToTokens(string text) : List<long>
+        - BuildSymbolMap() : Dictionary<char, int>
+        - ClauseOrTokenRegex() : Regex
+        - PhonemeTokenRegex() : Regex
         - espeak_Initialize(int output, int buflength, string? path, int options) : int
         - espeak_SetVoiceByName(string name) : int
         - espeak_TextToPhonemes(byte** textptr, int textmode, int phonememode) : byte*
@@ -76,7 +79,7 @@ public static unsafe partial class EspeakPhonemizer
         }
     }
 
-    /* Converts text into IPA phonemes while preserving punctuation, matching phonemizer.EspeakBackend */
+    /* Converts text into IPA phonemes clause-by-clause while preserving punctuation and whitespace */
     public static string Phonemize(string text)
     {
         EnsureInitialized();
@@ -84,41 +87,53 @@ public static unsafe partial class EspeakPhonemizer
         if (string.IsNullOrWhiteSpace(text))
             return string.Empty;
 
-        var sb = new StringBuilder();
-        var matches = Regex.Matches(text, @"\b[\w']+\b|[^\w\s]|\s+");
+        var sb = new StringBuilder(text.Length * 2);
+        var matches = ClauseOrTokenRegex().Matches(text);
 
-        foreach (Match match in matches)
+        lock (s_initLock)
         {
-            string token = match.Value;
-            if (char.IsLetterOrDigit(token[0]))
+            foreach (Match match in matches)
             {
-                byte[] utf8 = Encoding.UTF8.GetBytes(token + "\0");
-                fixed (byte* pUtf8 = utf8)
+                string token = match.Value;
+                if (char.IsLetterOrDigit(token[0]))
                 {
-                    byte* cur = pUtf8;
-                    while (cur != null && *cur != 0)
-                    {
-                        byte* ph = espeak_TextToPhonemes(&cur, EspeakCharsUtf8, EspeakPhonemesIpa);
-                        if (ph != null)
-                        {
-                            string? s = Marshal.PtrToStringUTF8((IntPtr)ph);
-                            if (!string.IsNullOrEmpty(s))
-                                sb.Append(s);
-                        }
-                        else
-                        {
-                            break;
-                        }
-                    }
+                    PhonemizeClause(token, sb);
                 }
-            }
-            else
-            {
-                sb.Append(token);
+                else
+                {
+                    sb.Append(token);
+                }
             }
         }
 
         return sb.ToString();
+    }
+
+    /* Invokes libespeak-ng on an entire contiguous word clause to preserve stress and heteronym context */
+    private static void PhonemizeClause(string clause, StringBuilder sb)
+    {
+        byte[] utf8 = Encoding.UTF8.GetBytes(clause + "\0");
+        bool appendedAny = false;
+        fixed (byte* pUtf8 = utf8)
+        {
+            byte* cur = pUtf8;
+            while (cur != null && *cur != 0)
+            {
+                byte* ph = espeak_TextToPhonemes(&cur, EspeakCharsUtf8, EspeakPhonemesIpa);
+                if (ph == null)
+                    break;
+
+                string? segment = Marshal.PtrToStringUTF8((IntPtr)ph);
+                if (!string.IsNullOrEmpty(segment))
+                {
+                    if (appendedAny && !char.IsWhiteSpace(sb[^1]) && !char.IsWhiteSpace(segment[0]))
+                        sb.Append(' ');
+
+                    sb.Append(segment);
+                    appendedAny = true;
+                }
+            }
+        }
     }
 
     /* Tokenizes phonemized text, adds start [0] and end [10, 0] tokens, and returns ONNX input_ids */
@@ -127,7 +142,7 @@ public static unsafe partial class EspeakPhonemizer
         if (string.IsNullOrWhiteSpace(phonemizedText))
             return [0, 10, 0];
 
-        var tokens = Regex.Matches(phonemizedText, @"\w+|[^\w\s]")
+        var tokens = PhonemeTokenRegex().Matches(phonemizedText)
             .Select(m => m.Value);
 
         string spaced = string.Join(" ", tokens);
@@ -148,6 +163,14 @@ public static unsafe partial class EspeakPhonemizer
 
         return indices.ToArray();
     }
+
+    /* Matches contiguous alphanumeric clauses, whitespace runs, or individual punctuation symbols */
+    [GeneratedRegex(@"(?:[\p{L}\p{N}][\p{L}\p{N}'’]*(?:[^\S\r\n]+[\p{L}\p{N}][\p{L}\p{N}'’]*)*)|\s+|[^\p{L}\p{N}\s]")]
+    private static partial Regex ClauseOrTokenRegex();
+
+    /* Matches phoneme word runs or non-whitespace punctuation symbols for Kitten tokenization */
+    [GeneratedRegex(@"\w+|[^\w\s]")]
+    private static partial Regex PhonemeTokenRegex();
 
     /* Resolves bundled or system libespeak-ng library across platforms */
     private static IntPtr ResolveLibrary(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)

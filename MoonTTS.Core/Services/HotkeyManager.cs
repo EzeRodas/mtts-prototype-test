@@ -27,9 +27,8 @@ public class HotkeyManager
     private readonly IAudioPlayer _audioPlayer;
     private readonly IConfigurationRepository _repo;
 
-    /* Path for JSON related file, directory for audio files, and serializer for the JSON file */
+    /* Base directory for profile hotkey folders and audio files */
     private readonly string _hotkeysBaseDir;
-    private readonly string _audioDir;
     
     /* Event for the AvaloniaUI to refresh */
     public event Action? OnHotkeysChanged;
@@ -137,31 +136,7 @@ public class HotkeyManager
         if (!File.Exists(wavPath)) 
             return Result.Failure($"Audio file for hotkey '{entry.Hotkey}' does not exist on disk or was not found");
 
-        var config = _repo.AppConfig;
-        if (!config.EnablePrimaryPlayback && !config.EnableMonitorPlayback)
-            return Result.Success();
-
-        try
-        {
-            byte[] wavBytes = await File.ReadAllBytesAsync(wavPath);
-
-            AudioFormat format = FormatReader.GetFormatFromWavHeader(wavBytes);
-            
-            ReadOnlyMemory<byte> pcm = wavBytes.Length > 44 ? wavBytes.AsMemory(44) : wavBytes;
-
-            /* Routes the audio */
-            string? primaryId = config.EnablePrimaryPlayback ? config.PrimaryAudioDeviceId : null;
-            string? monitorId = config.EnableMonitorPlayback ? config.MonitorAudioDeviceId : null;
-            
-            _audioPlayer.SetOutputDevices(primaryId, monitorId);
-            _audioPlayer.SetVolume(config.PrimaryVolume, config.MonitorVolume);
-
-            return await _audioPlayer.PlayPcmAsync(pcm, format, cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            return Result.Failure($"Failed to play hotkey audio: {ex.Message}", ex);
-        }
+        return await _speechPipeline.PlayWavFileAsync(wavPath, cancellationToken);
     }
 
     /* Plays the pre-rendered audio associated with a hotkey matching the given key string */
