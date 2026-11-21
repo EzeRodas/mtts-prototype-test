@@ -33,6 +33,7 @@ public sealed class UiStrings
     public string DownloadEngineInfoTooltip { get; init; } = "To download a TTS Engine please head to the \"Engine Management\" tab on the Advanced Settings menu.";
     public string DownloadEngineHoverTooltip { get; init; } = "To download a TTS Engine please head to the \"Engine Management\" tab on the Advanced Settings menu. Click to open it.";
     public string VoiceLabel { get; init; } = "Voice";
+    public string LoadingVoices { get; init; } = "Loading...";
     public string AudioOutputLabel { get; init; } = "Audio Output";
     public string MonitoringLabel { get; init; } = "Monitoring";
     public string UnselectedModel { get; init; } = "Unselected";

@@ -24,6 +24,7 @@ namespace MoonTTS.Avalonia.ViewModels;
         - Hotkeys : HotkeysSettingsViewModel
         - EngineManagement : EngineManagementViewModel
         - IsLinux : bool
+        - VoicePlaceholderText : string
         - IsRecordingToggleHotkey : bool
         - IsRecordingPhraseHotkey : bool
         - ApplyRecordedHotkey(string) : void
@@ -92,6 +93,14 @@ public partial class SettingsViewModel : ViewModelBase, IDisposable
 
     [ObservableProperty]
     private AdvancedTab _selectedTab = AdvancedTab.General;
+
+    /* True while the engine worker is starting up or switching models and voices are not yet ready */
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(VoicePlaceholderText))]
+    private bool _isLoadingVoices;
+
+    /* Displays a localized loading placeholder in the voice selector while voices are loading */
+    public string VoicePlaceholderText => IsLoadingVoices ? L.Strings.LoadingVoices : string.Empty;
 
     /* Quick & Audio Settings */
     [ObservableProperty]
@@ -238,6 +247,7 @@ public partial class SettingsViewModel : ViewModelBase, IDisposable
     private void OnLanguageChanged()
     {
         Hotkeys.RefreshLocalizedProperties();
+        OnPropertyChanged(nameof(VoicePlaceholderText));
 
         bool prevLoading = _isLoading;
         _isLoading = true;
@@ -394,19 +404,42 @@ public partial class SettingsViewModel : ViewModelBase, IDisposable
         if (_engineProvider == null)
             return;
 
-        var engine = await _engineProvider.GetEngineAsync();
+        bool showLoading = SelectedModel != null && !SelectedModel.IsUnselected;
+        if (showLoading)
+        {
+            IsLoadingVoices = true;
+            _isLoading = true;
+            try
+            {
+                AvailableVoices.Clear();
+                SelectedVoice = null;
+            }
+            finally
+            {
+                _isLoading = false;
+            }
+        }
 
-        _isLoading = true;
         try
         {
-            AvailableVoices.Clear();
-            foreach (var voice in engine.ListVoices())
-                AvailableVoices.Add(voice);
-            SelectVoiceFromConfig();
+            var engine = await _engineProvider.GetEngineAsync();
+
+            _isLoading = true;
+            try
+            {
+                AvailableVoices.Clear();
+                foreach (var voice in engine.ListVoices())
+                    AvailableVoices.Add(voice);
+                SelectVoiceFromConfig();
+            }
+            finally
+            {
+                _isLoading = false;
+            }
         }
         finally
         {
-            _isLoading = false;
+            IsLoadingVoices = false;
         }
     }
 
@@ -541,30 +574,53 @@ public partial class SettingsViewModel : ViewModelBase, IDisposable
         if (_engineProvider == null)
             return;
 
-        var switchResult = await _engineProvider.SwitchModelAsync(model.Id);
-        if (switchResult.IsSuccess)
+        if (!model.IsUnselected)
         {
-            await RefreshVoicesAsync();
-            if (_settingsManager != null && !model.IsUnselected)
+            IsLoadingVoices = true;
+            _isLoading = true;
+            try
             {
-                _isLoading = true;
-                try
-                {
-                    float speed = _settingsManager.GetEngineConfig(model.Id).Speed;
-                    SpeechSpeed = speed > 0 ? speed : 1.0f;
-                }
-                finally
-                {
-                    _isLoading = false;
-                }
+                AvailableVoices.Clear();
+                SelectedVoice = null;
             }
-            AutoSave();
+            finally
+            {
+                _isLoading = false;
+            }
         }
-        else
+
+        try
         {
-            AppLogger.Error("SettingsViewModel", $"Model switch failed: {switchResult.ErrorMessage}", switchResult.Exception);
-            ShowModelStatus(switchResult.ErrorMessage ?? L.Strings.ModelSwitchFailed);
-            await RevertModelSelectionAsync();
+            var switchResult = await _engineProvider.SwitchModelAsync(model.Id);
+            if (switchResult.IsSuccess)
+            {
+                await RefreshVoicesAsync();
+                if (_settingsManager != null && !model.IsUnselected)
+                {
+                    _isLoading = true;
+                    try
+                    {
+                        float speed = _settingsManager.GetEngineConfig(model.Id).Speed;
+                        SpeechSpeed = speed > 0 ? speed : 1.0f;
+                    }
+                    finally
+                    {
+                        _isLoading = false;
+                    }
+                }
+                AutoSave();
+            }
+            else
+            {
+                AppLogger.Error("SettingsViewModel", $"Model switch failed: {switchResult.ErrorMessage}", switchResult.Exception);
+                ShowModelStatus(switchResult.ErrorMessage ?? L.Strings.ModelSwitchFailed);
+                await RevertModelSelectionAsync();
+                await RefreshVoicesAsync();
+            }
+        }
+        finally
+        {
+            IsLoadingVoices = false;
         }
     }
 

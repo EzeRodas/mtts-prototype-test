@@ -26,6 +26,7 @@
   "DownloadEngineInfoTooltip": "To download a TTS Engine please head to the \"Engine Management\" tab on the Advanced Settings menu.",
   "DownloadEngineHoverTooltip": "To download a TTS Engine please head to the \"Engine Management\" tab on the Advanced Settings menu. Click to open it.",
   "VoiceLabel": "Voice",
+  "LoadingVoices": "Loading...",
   "AudioOutputLabel": "Audio Output",
   "MonitoringLabel": "Monitoring",
   "UnselectedModel": "Unselected",

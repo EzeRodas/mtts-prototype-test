@@ -26,6 +26,7 @@
   "DownloadEngineInfoTooltip": "Para descargar un motor TTS, diríjase a la pestaña \"Gestión de motores\" en el menú de Configuración avanzada.",
   "DownloadEngineHoverTooltip": "Para descargar un motor TTS, diríjase a la pestaña \"Gestión de motores\" en el menú de Configuración avanzada. Haga clic para abrirla.",
   "VoiceLabel": "Voz",
+  "LoadingVoices": "Cargando...",
   "AudioOutputLabel": "Salida de audio",
   "MonitoringLabel": "Monitoreo",
   "UnselectedModel": "Sin seleccionar",

@@ -202,7 +202,7 @@
                         
                         <Grid ColumnDefinitions="70,*">
                             <TextBlock Text="{Binding L.Strings.VoiceLabel}" Classes="field-label" VerticalAlignment="Center"/>
-                            <ComboBox Grid.Column="1" ItemsSource="{Binding AvailableVoices}" SelectedItem="{Binding SelectedVoice}" HorizontalAlignment="Stretch">
+                            <ComboBox Grid.Column="1" ItemsSource="{Binding AvailableVoices}" SelectedItem="{Binding SelectedVoice}" PlaceholderText="{Binding VoicePlaceholderText}" IsEnabled="{Binding !IsLoadingVoices}" HorizontalAlignment="Stretch">
                                 <ComboBox.ItemTemplate>
                                     <DataTemplate x:DataType="valueObjects:VoiceInfo">
                                         <TextBlock Text="{Binding DisplayName}"/>
@@ -497,7 +497,7 @@
                                 <TextBlock Text="{Binding ModelStatusMessage}" Foreground="{StaticResource DangerBrush}" TextWrapping="Wrap"
                                            IsVisible="{Binding ModelStatusMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
                                 <TextBlock Text="{Binding L.Strings.VoicePresetLabel}" Classes="field-label"/>
-                                <ComboBox ItemsSource="{Binding AvailableVoices}" SelectedItem="{Binding SelectedVoice}" HorizontalAlignment="Stretch">
+                                <ComboBox ItemsSource="{Binding AvailableVoices}" SelectedItem="{Binding SelectedVoice}" PlaceholderText="{Binding VoicePlaceholderText}" IsEnabled="{Binding !IsLoadingVoices}" HorizontalAlignment="Stretch">
                                     <ComboBox.ItemTemplate>
                                         <DataTemplate x:DataType="valueObjects:VoiceInfo">
                                             <TextBlock Text="{Binding DisplayName}"/>
