@@ -48,6 +48,9 @@ public class LinuxProcessRunner : ILinuxCommandRunner
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+            /* Force C locale so pactl / wpctl output labels are English regardless of the user's system language */
+            proc.StartInfo.Environment["LC_ALL"] = "C";
+            proc.StartInfo.Environment["LANG"] = "C";
             if (!proc.Start())
                 return Result<string>.Failure($"Failed to start '{fileName}'.");
 

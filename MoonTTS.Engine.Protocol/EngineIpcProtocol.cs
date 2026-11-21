@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
@@ -32,14 +33,22 @@ public static class EngineIpcProtocol
         if (payload.Length > MaxPayloadSize)
             throw new InvalidOperationException($"Engine IPC payload too large: {payload.Length} bytes.");
 
-        byte[] header = new byte[HeaderSize];
-        header[0] = MagicFirst;
-        header[1] = MagicSecond;
-        header[2] = (byte)opcode;
-        header[3] = 0;
-        BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(4, 4), (uint)payload.Length);
+        byte[] header = ArrayPool<byte>.Shared.Rent(HeaderSize);
+        try
+        {
+            header[0] = MagicFirst;
+            header[1] = MagicSecond;
+            header[2] = (byte)opcode;
+            header[3] = 0;
+            BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(4, 4), (uint)payload.Length);
 
-        await stream.WriteAsync(header, cancellationToken).ConfigureAwait(false);
+            await stream.WriteAsync(header.AsMemory(0, HeaderSize), cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(header);
+        }
+
         if (!payload.IsEmpty)
             await stream.WriteAsync(payload, cancellationToken).ConfigureAwait(false);
 
@@ -60,21 +69,32 @@ public static class EngineIpcProtocol
         Stream stream,
         CancellationToken cancellationToken = default)
     {
-        byte[] header = new byte[HeaderSize];
-        int headerRead = await stream.ReadAtLeastAsync(header, HeaderSize, throwOnEndOfStream: false, cancellationToken)
-            .ConfigureAwait(false);
+        EngineOpcode opcode;
+        byte flags;
+        uint payloadLength;
 
-        if (headerRead == 0)
-            return null;
-        if (headerRead < HeaderSize)
-            throw new EndOfStreamException("Engine IPC stream ended in the middle of a frame header.");
+        byte[] header = ArrayPool<byte>.Shared.Rent(HeaderSize);
+        try
+        {
+            int headerRead = await stream.ReadAtLeastAsync(header.AsMemory(0, HeaderSize), HeaderSize, throwOnEndOfStream: false, cancellationToken)
+                .ConfigureAwait(false);
 
-        if (header[0] != MagicFirst || header[1] != MagicSecond)
-            throw new InvalidDataException("Engine IPC frame has invalid magic bytes; the stream is out of sync.");
+            if (headerRead == 0)
+                return null;
+            if (headerRead < HeaderSize)
+                throw new EndOfStreamException("Engine IPC stream ended in the middle of a frame header.");
 
-        var opcode = (EngineOpcode)header[2];
-        byte flags = header[3];
-        uint payloadLength = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(4, 4));
+            if (header[0] != MagicFirst || header[1] != MagicSecond)
+                throw new InvalidDataException("Engine IPC frame has invalid magic bytes; the stream is out of sync.");
+
+            opcode = (EngineOpcode)header[2];
+            flags = header[3];
+            payloadLength = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(4, 4));
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(header);
+        }
 
         if (payloadLength > MaxPayloadSize)
             throw new InvalidDataException($"Invalid engine IPC payload size: {payloadLength} bytes.");

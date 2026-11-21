@@ -99,7 +99,7 @@ public class JsonConfigurationRepository : IConfigurationRepository
         AppConfigChanged?.Invoke();
     }
 
-    public void SaveDictionary(List<DictionaryEntry> entries)
+    public void SaveDictionary(IReadOnlyList<DictionaryEntry> entries)
     {
         List<DictionaryEntry> entriesList = entries.ToList();
         DictionaryEntries = entriesList;
@@ -115,9 +115,9 @@ public class JsonConfigurationRepository : IConfigurationRepository
         ProfilesChanged?.Invoke();
     }
 
-    public void SaveHotkeys(List<HotkeyEntry> entries)
+    public void SaveHotkeys(IReadOnlyList<HotkeyEntry> entries)
     {
-        List<HotkeyEntry> entriesList =  entries.ToList();
+        List<HotkeyEntry> entriesList = entries.ToList();
         Hotkeys = entriesList;
 
         /* Saves to the currently active subfolder */
@@ -128,14 +128,14 @@ public class JsonConfigurationRepository : IConfigurationRepository
         HotkeysChanged?.Invoke();
     }
 
-    public void SaveHistory(List<HistoryEntry> entires)
+    public void SaveHistory(IReadOnlyList<HistoryEntry> entries)
     {
-        List<HistoryEntry> entriesList = entires.ToList();
+        List<HistoryEntry> entriesList = entries.ToList();
         HistoryEntries = entriesList;
 
         string path = Path.Combine("audio", "history", "history.json");
         SaveInternal(path, entriesList, AppJsonContext.Default.ListHistoryEntry);
-        
+
         HistoryChanged?.Invoke();
     }
 
@@ -162,6 +162,7 @@ public class JsonConfigurationRepository : IConfigurationRepository
         return Path.Combine("engine configurations", engineFolder, $"{modelFile}.json");
     }
 
+    /* Deserializes a JSON config file; quarantines corrupted files into a .corrupt.bak copy before falling back */
     private T? LoadInternal<T>(string relativePath, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> typeInfo)
     {
         string fullPath = Path.Combine(_configDirectory, relativePath);
@@ -174,26 +175,46 @@ public class JsonConfigurationRepository : IConfigurationRepository
                 return JsonSerializer.Deserialize(fs, typeInfo);
             }
         }
-        catch
+        catch (Exception ex)
         {
+            AppLogger.Error("JsonConfigurationRepository", $"Failed to load '{relativePath}'; backing up corrupted file", ex);
+            try
+            {
+                string backupPath = $"{fullPath}.corrupt.{DateTime.UtcNow:yyyyMMddHHmmss}.bak";
+                File.Copy(fullPath, backupPath, overwrite: true);
+            }
+            catch
+            {
+                /* Ignore backup failure */
+            }
             return default;
         }
     }
 
+    /* Atomically writes JSON via a cross-process-unique temp file with flush-to-disk before rename */
     private void SaveInternal<T>(string relativePath, T data, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> typeInfo)
     {
         string fullPath = Path.Combine(_configDirectory, relativePath);
-        string tempPath = fullPath + ".tmp";
-        
+        string tempPath = $"{fullPath}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
+
         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
 
         lock (_processLock)
         {
-            using (var fs = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            try
             {
-                JsonSerializer.Serialize(fs, data, typeInfo);
+                using (var fs = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    JsonSerializer.Serialize(fs, data, typeInfo);
+                    fs.Flush(flushToDisk: true);
+                }
+                File.Move(tempPath, fullPath, overwrite: true);
             }
-            File.Move(tempPath, fullPath, overwrite:true);
+            catch
+            {
+                try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+                throw;
+            }
         }
     }
 

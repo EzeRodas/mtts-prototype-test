@@ -36,6 +36,8 @@ public sealed class ExternalTtsEngine : ITtsEngine
     private static readonly TimeSpan MetadataTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan LoadModelTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan VoicesTimeout = TimeSpan.FromSeconds(15);
+    private const int MaxConsecutiveRestarts = 3;
+    private const long RestartWindowMs = 15_000;
 
     private readonly EngineDescriptor _engine;
     private readonly ModelMetadata _model;
@@ -47,6 +49,8 @@ public sealed class ExternalTtsEngine : ITtsEngine
     private EngineProcess? _process;
     private EngineMetadataMessage _metadata = new();
     private IReadOnlyList<VoiceInfo> _voices = Array.Empty<VoiceInfo>();
+    private int _consecutiveRestarts;
+    private long _lastRestartTick;
     private bool _disposed;
 
     public AudioFormat OutputFormat => new(
@@ -143,6 +147,7 @@ public sealed class ExternalTtsEngine : ITtsEngine
         await foreach (var chunk in process.StreamAsync(EngineOpcode.Synthesize, payload, cancellationToken)
                            .ConfigureAwait(false))
         {
+            _consecutiveRestarts = 0;
             yield return chunk;
         }
     }
@@ -221,7 +226,7 @@ public sealed class ExternalTtsEngine : ITtsEngine
         }
     }
 
-    /* Returns a live worker, restarting it if it crashed since the last request */
+    /* Returns a live worker, restarting it with crash-loop protection if it crashed since the last request */
     private async Task<EngineProcess> EnsureWorkerAsync(CancellationToken cancellationToken)
     {
         var current = _process;
@@ -234,7 +239,18 @@ public sealed class ExternalTtsEngine : ITtsEngine
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (_process == null || _process.HasExited)
             {
-                Console.Error.WriteLine($"[ExternalTtsEngine] Restarting the '{_engine.Id}' engine worker.");
+                long now = Environment.TickCount64;
+                if (now - _lastRestartTick > RestartWindowMs)
+                    _consecutiveRestarts = 0;
+
+                if (_consecutiveRestarts >= MaxConsecutiveRestarts)
+                    throw new EngineWorkerException(
+                        $"Engine worker '{_engine.Id}' crashed repeatedly ({MaxConsecutiveRestarts} times in {RestartWindowMs / 1000}s). Check logs for details.");
+
+                _consecutiveRestarts++;
+                _lastRestartTick = now;
+
+                AppLogger.Warning("ExternalTtsEngine", $"Restarting crashed engine worker '{_engine.Id}' (attempt {_consecutiveRestarts}/{MaxConsecutiveRestarts}).");
                 _process?.Dispose();
                 _process = null;
                 await StartWorkerAsync(cancellationToken).ConfigureAwait(false);

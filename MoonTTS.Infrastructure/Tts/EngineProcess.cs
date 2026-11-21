@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text.Json.Serialization.Metadata;
+using MoonTTS.Core.Utilities;
 using MoonTTS.Domain.ValueObjects;
 using MoonTTS.Engine.Protocol;
 
@@ -91,9 +93,13 @@ public sealed class EngineProcess : IDisposable
         process.ErrorDataReceived += (_, e) =>
         {
             if (!string.IsNullOrEmpty(e.Data))
-                Console.Error.WriteLine($"[engine:{engine.Id}] {e.Data}");
+                AppLogger.Info($"engine:{engine.Id}", e.Data);
         };
         process.BeginErrorReadLine();
+
+        /* On Windows, attach the worker to a kill-on-close Job Object so a hard host crash cannot leave orphan workers */
+        if (OperatingSystem.IsWindows())
+            WindowsJobObject.AssignProcess(process);
 
         return new EngineProcess(process, engine.Id);
     }
@@ -302,7 +308,7 @@ public sealed class EngineProcess : IDisposable
         }
     }
 
-    /* Closes stdin (the worker exits on end of input) and kills it if it does not exit promptly */
+    /* Sends a best-effort Shutdown frame, closes stdin, and kills the worker if it does not exit promptly */
     public void Dispose()
     {
         if (_disposed) return;
@@ -310,6 +316,21 @@ public sealed class EngineProcess : IDisposable
 
         try
         {
+            if (!HasExited)
+            {
+                try
+                {
+                    using var shutdownCts = new CancellationTokenSource(300);
+                    EngineIpcProtocol.WriteFrameAsync(_input, EngineOpcode.Shutdown, ReadOnlyMemory<byte>.Empty, shutdownCts.Token)
+                        .AsTask()
+                        .Wait(300);
+                }
+                catch
+                {
+                    /* Worker may already be exiting or pipe closed */
+                }
+            }
+
             _input.Dispose();
             if (!_process.WaitForExit(ShutdownTimeout))
                 Kill();
@@ -323,5 +344,119 @@ public sealed class EngineProcess : IDisposable
             _process.Dispose();
             _exchangeLock.Dispose();
         }
+    }
+
+    /* Process-wide Windows Job Object configured with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE */
+    private static unsafe class WindowsJobObject
+    {
+        private const int JobObjectExtendedLimitInformation = 9;
+        private const uint JobObjectLimitKillOnJobClose = 0x2000;
+
+        private static readonly nint JobHandle = CreateKillOnCloseJob();
+
+        /* Assigns a child worker process to the shared kill-on-close Job Object */
+        public static void AssignProcess(Process process)
+        {
+            if (JobHandle == 0)
+                return;
+
+            try
+            {
+                AssignProcessToJobObject(JobHandle, process.Handle);
+            }
+            catch
+            {
+                /* Best-effort; e.g. process already exited or nested job disallowed on legacy OS */
+            }
+        }
+
+        private static nint CreateKillOnCloseJob()
+        {
+            if (!OperatingSystem.IsWindows())
+                return 0;
+
+            try
+            {
+                nint job = CreateJobObjectW(0, null);
+                if (job == 0)
+                    return 0;
+
+                var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+                {
+                    BasicLimitInformation = new JOBOBJECT_BASIC_LIMIT_INFORMATION
+                    {
+                        LimitFlags = JobObjectLimitKillOnJobClose
+                    }
+                };
+
+                if (!SetInformationJobObject(
+                        job,
+                        JobObjectExtendedLimitInformation,
+                        &info,
+                        (uint)sizeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION)))
+                {
+                    CloseHandle(job);
+                    return 0;
+                }
+
+                return job;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+        {
+            public long PerProcessUserTimeLimit;
+            public long PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public nuint MinimumWorkingSetSize;
+            public nuint MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public nuint Affinity;
+            public uint PriorityClass;
+            public uint SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IO_COUNTERS
+        {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+        {
+            public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+            public IO_COUNTERS IoInfo;
+            public nuint ProcessMemoryLimit;
+            public nuint JobMemoryLimit;
+            public nuint PeakProcessMemoryUsed;
+            public nuint PeakJobMemoryUsed;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        private static extern nint CreateJobObjectW(nint lpJobAttributes, string? lpName);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool SetInformationJobObject(
+            nint hJob,
+            int jobObjectInfoClass,
+            void* lpJobObjectInfo,
+            uint cbJobObjectInfoLength);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool AssignProcessToJobObject(nint hJob, nint hProcess);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool CloseHandle(nint hObject);
     }
 }

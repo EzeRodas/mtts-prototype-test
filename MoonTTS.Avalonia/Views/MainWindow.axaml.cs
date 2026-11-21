@@ -92,7 +92,7 @@ public partial class MainWindow : Window
     {
         Screen? targetScreen = null;
 
-        if (monitorIndex.HasValue && monitorIndex.Value > 0 && monitorIndex.Value < Screens.All.Count)
+        if (monitorIndex.HasValue && monitorIndex.Value >= 0 && monitorIndex.Value < Screens.All.Count)
         {
             targetScreen = Screens.All[monitorIndex.Value];
         }

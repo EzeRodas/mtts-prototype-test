@@ -20,7 +20,8 @@ public record ModelMetadata(
     string? CpuUsage = null,
     IReadOnlyList<string>? Languages = null,
     bool IsSeparator = false,
-    bool IsDownloaded = true
+    bool IsDownloaded = true,
+    IReadOnlyDictionary<string, string>? FileChecksums = null
 )
 {
     /* Null-object entry representing "no model selected", so selectors always have a concrete item to show */

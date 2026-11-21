@@ -1,15 +1,15 @@
-using System.Text.Json;
 using MoonTTS.Core.Utilities;
 using MoonTTS.Domain.Audio;
 using MoonTTS.Domain.Common;
 using MoonTTS.Domain.Constants;
 using MoonTTS.Domain.Entities;
 using MoonTTS.Domain.Interfaces;
+using MoonTTS.Domain.ValueObjects;
 
 namespace MoonTTS.Core.Services;
 
 /* File Structure:
-        - HotkeyManager(ISpeechPipeline speechPipeline, IAudioPlayer audioPlayer, IConfigurationRepository repo)
+        - HotkeyManager(ISpeechPipeline speechPipeline, IConfigurationRepository repo)
         - GetHotkeys() : IReadOnlyList<HotkeyEntry>
         - GetToggleHotkey() : string
         - AssignToggleHotkey(string hotkey) : Result
@@ -24,24 +24,21 @@ namespace MoonTTS.Core.Services;
 public class HotkeyManager
 {
     private readonly ISpeechPipeline _speechPipeline;
-    private readonly IAudioPlayer _audioPlayer;
     private readonly IConfigurationRepository _repo;
 
     /* Base directory for profile hotkey folders and audio files */
     private readonly string _hotkeysBaseDir;
-    
+
     /* Event for the AvaloniaUI to refresh */
     public event Action? OnHotkeysChanged;
     public event Action<string>? OnToggleHotkeyChanged;
 
-    /* Constructor */
+    /* Initializes hotkey manager with the unified speech pipeline and configuration repository */
     public HotkeyManager(
         ISpeechPipeline speechPipeline,
-        IAudioPlayer audioPlayer,
         IConfigurationRepository repo)
     {
         _speechPipeline = speechPipeline;
-        _audioPlayer = audioPlayer;
         _repo = repo;
 
         /* Sets the correct paths */
@@ -58,11 +55,11 @@ public class HotkeyManager
 
     public Result AssignToggleHotkey(string hotkey)
     {
-        if (string.IsNullOrWhiteSpace(hotkey))
-            return Result.Failure("Hotkey cannot be empty.");
-        
+        if (string.IsNullOrWhiteSpace(hotkey) || !ShortcutCombo.TryParse(hotkey, out var parsed) || parsed == null)
+            return Result.Failure("Invalid hotkey combination.");
+
         var config = _repo.AppConfig;
-        config.ToggleAppHotkey = hotkey.Trim();
+        config.ToggleAppHotkey = parsed.ToString();
 
         _repo.SaveAppConfig(config);
         OnToggleHotkeyChanged?.Invoke(config.ToggleAppHotkey);
@@ -98,7 +95,8 @@ public class HotkeyManager
         if (!string.IsNullOrEmpty(wavDir))
             Directory.CreateDirectory(wavDir);
 
-        // Synthesizes and exports directly through the speech pipeline with playback disabled
+        /* Synthesizes and exports directly through the speech pipeline with playback disabled.
+           By design, this acquires the active pipeline session and interrupts any ongoing live speech */
         var synthResult = await _speechPipeline.SpeakAsync(text, new SpeechOptions
         {
             EnablePlayback = false,
@@ -180,8 +178,9 @@ public class HotkeyManager
     {
         var activeProfileName = _repo.ProfileData.ActiveProfileName;
         var activeProfile = _repo.ProfileData.Profiles.FirstOrDefault(p => p.Name == activeProfileName)
-                            ?? _repo.ProfileData.Profiles.First();
+                            ?? _repo.ProfileData.Profiles.FirstOrDefault();
 
-        return Path.Combine(_hotkeysBaseDir, activeProfile.FolderName, $"{id}.wav");
+        string folderName = activeProfile?.FolderName ?? ProfileManager.DefaultProfileName;
+        return Path.Combine(_hotkeysBaseDir, folderName, $"{id}.wav");
     }
 }

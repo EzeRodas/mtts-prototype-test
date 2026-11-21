@@ -13,6 +13,7 @@ using MoonTTS.Avalonia.Services;
 using MoonTTS.Avalonia.ViewModels;
 using MoonTTS.Avalonia.Views;
 using MoonTTS.Core.Services;
+using MoonTTS.Core.Utilities;
 using MoonTTS.Domain.Interfaces;
 using MoonTTS.Domain.ValueObjects;
 using MoonTTS.Infrastructure.Audio;
@@ -24,9 +25,19 @@ using UIDispatcher = Avalonia.Threading.Dispatcher;
 
 namespace MoonTTS.Avalonia;
 
+/* File Structure:
+        - Initialize() : void
+        - OnFrameworkInitializationCompleted() : void
+        - InitializeGlobalShortcutsAsync(GlobalShortcutManager, HotkeyManager, IWindowService) : Task
+        - RefreshGlobalShortcutsAsync(GlobalShortcutManager, HotkeyManager) : Task
+        - PlayPhraseShortcutAsync(HotkeyManager, Guid) : Task
+        - ConfigureServices(IServiceCollection, IClassicDesktopStyleApplicationLifetime) : void
+*/
+
 public partial class App : Application
 {
     private static IServiceProvider Services { get; set; } = null!;
+    private CancellationTokenSource? _singleInstanceCts;
 
     /* Loads the application XAML markup */
     public override void Initialize()
@@ -34,50 +45,45 @@ public partial class App : Application
         AvaloniaXamlLoader.Load(this);
     }
 
-    /* Sets up dependency injection, builds the service provider, and configures the desktop lifetime */
+    /* Sets up dependency injection, crash logging, desktop lifetime, and background OS integrations */
     public override void OnFrameworkInitializationCompleted()
     {
-        var collection = new ServiceCollection();
-        ConfigureServices(collection);
-        Services = collection.BuildServiceProvider();
-        
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            AppLogger.Error("AppDomain", "Unhandled exception", e.ExceptionObject as Exception);
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            AppLogger.Error("TaskScheduler", "Unobserved task exception", e.Exception);
+            e.SetObserved();
+        };
+
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
+            var collection = new ServiceCollection();
+            ConfigureServices(collection, desktop);
+            Services = collection.BuildServiceProvider();
+
             /* Prevents the app from exiting when the window is hidden */
             desktop.ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
-            /* Disposes singletons on exit so engine workers are shut down cleanly */
-            desktop.Exit += (_, _) => (Services as IDisposable)?.Dispose();
+            _singleInstanceCts = new CancellationTokenSource();
 
-            
-            /* Creates thw window and service */
-            var mainWindow = new MainWindow();
+            /* Cancels background listeners and disposes singletons on exit so engine workers shut down cleanly */
+            desktop.Exit += (_, _) =>
+            {
+                _singleInstanceCts?.Cancel();
+                _singleInstanceCts?.Dispose();
+                _singleInstanceCts = null;
+                (Services as IDisposable)?.Dispose();
+            };
+
             var settingsManager = Services.GetRequiredService<SettingsManager>();
-            var audioPlayer = Services.GetRequiredService<IAudioPlayer>();
-            var downloadManager = Services.GetRequiredService<DownloadManager>();
-            var dictionaryManager = Services.GetRequiredService<DictionaryManager>();
+            LocalizationService.Instance.SetLanguage(settingsManager.CurrentAppConfig.Language);
+
+            var mainWindow = Services.GetRequiredService<MainWindow>();
+            var windowService = Services.GetRequiredService<IWindowService>();
+            var mainViewModel = Services.GetRequiredService<MainViewModel>();
             var hotkeyManager = Services.GetRequiredService<HotkeyManager>();
-            var historyManager = Services.GetRequiredService<HistoryManager>();
-            var profileManager = Services.GetRequiredService<ProfileManager>();
-            var engineProvider = Services.GetRequiredService<ITtsEngineProvider>();
-            var overlayHelper = Services.GetRequiredService<IWindowOverlayHelper>();
-
-            var windowService = new WindowService(
-                mainWindow,
-                desktop,
-                settingsManager,
-                audioPlayer,
-                downloadManager,
-                dictionaryManager,
-                hotkeyManager,
-                historyManager,
-                engineProvider,
-                overlayHelper,
-                profileManager);
-            var speechPipeline = Services.GetRequiredService<ISpeechPipeline>();
             var shortcutManager = Services.GetRequiredService<GlobalShortcutManager>();
-
-            var mainViewModel = new MainViewModel(speechPipeline, windowService, hotkeyManager, historyManager);
 
             /* Sets the datacontext on the window and application */
             mainWindow.DataContext = mainViewModel;
@@ -87,30 +93,33 @@ public partial class App : Application
             {
                 desktop.MainWindow = mainWindow;
             }
-            
+
             /* Listens for secondary launch instances and toggles window visibility */
             SingleInstanceService.StartServer(() =>
             {
                 UIDispatcher.UIThread.Post(windowService.ShowMainWindow);
-            }, CancellationToken.None);
-            
-            /* Creates a virtual microphone for linux on startup */
+            }, _singleInstanceCts.Token);
+
+            /* Creates a virtual microphone for Linux in the background so UI startup never blocks on subprocesses */
             var config = settingsManager.CurrentAppConfig;
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux) && config.CreateMicOnStartup)
             {
-                LinuxVirtualMicService.EnsureCreated();
+                _ = Task.Run(() =>
+                {
+                    var micResult = LinuxVirtualMicService.EnsureCreated();
+                    if (micResult.IsFailure)
+                        AppLogger.Warning("App", $"Startup virtual mic creation failed: {micResult.ErrorMessage}");
+                });
             }
 
-            /* Initializes global OS shortcut hook asynchronously without blocking appstartup */
+            /* Initializes global OS shortcut hook asynchronously without blocking app startup */
             _ = InitializeGlobalShortcutsAsync(shortcutManager, hotkeyManager, windowService);
         }
+
         base.OnFrameworkInitializationCompleted();
-        
-        GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
-        GC.WaitForPendingFinalizers();
     }
 
-    /* Initializes the global shortcut manager, registers the toggle hotkey, and wireschange notifications */
+    /* Initializes the global shortcut manager, registers the toggle hotkey, and wires change notifications */
     private static async Task InitializeGlobalShortcutsAsync(
         GlobalShortcutManager shortcutManager,
         HotkeyManager hotkeyManager,
@@ -135,7 +144,7 @@ public partial class App : Application
                 }
             };
 
-            hotkeyManager.OnToggleHotkeyChanged += newkey =>
+            hotkeyManager.OnToggleHotkeyChanged += newKey =>
             {
                 _ = RefreshGlobalShortcutsAsync(shortcutManager, hotkeyManager);
             };
@@ -148,10 +157,11 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"/* Failed to initialize global hotkey hook: {ex.Message} */");
+            AppLogger.Error("App", "Failed to initialize global hotkey hook", ex);
         }
     }
-    
+
+    /* Synchronizes all active toggle and phrase shortcuts with the OS shortcut hook */
     private static async Task RefreshGlobalShortcutsAsync(
         GlobalShortcutManager shortcutManager,
         HotkeyManager hotkeyManager)
@@ -176,7 +186,7 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Failed to update global shortcuts: {ex.Message}");
+            AppLogger.Error("App", "Failed to update global shortcuts", ex);
         }
     }
 
@@ -188,24 +198,34 @@ public partial class App : Application
             var result = await hotkeyManager.PlayHotkeyAsync(entryId);
             if (result.IsFailure)
             {
-                Console.WriteLine($"Phrase shortcut failed: {result.ErrorMessage}");
+                AppLogger.Warning("App", $"Phrase shortcut failed: {result.ErrorMessage}");
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Phrase shortcut failed: {ex.Message}");
+            AppLogger.Error("App", "Phrase shortcut failed", ex);
         }
     }
 
-    /* Registers application services, repositories, players, and engines in the DI container */
-    private static void ConfigureServices(IServiceCollection services)
+    /* Registers application services, repositories, players, engines, windows, and view models in DI */
+    private static void ConfigureServices(
+        IServiceCollection services,
+        IClassicDesktopStyleApplicationLifetime desktop)
     {
+        services.AddSingleton(desktop);
         services.AddSingleton<IConfigurationRepository, JsonConfigurationRepository>();
         services.AddSingleton<SettingsManager>();
         services.AddSingleton<DictionaryManager>();
         services.AddSingleton<HistoryManager>();
         services.AddSingleton<ProfileManager>();
-        services.AddSingleton<HttpClient>();
+        services.AddSingleton(_ => new HttpClient(new SocketsHttpHandler
+        {
+            ConnectTimeout = TimeSpan.FromSeconds(15),
+            PooledConnectionLifetime = TimeSpan.FromMinutes(2)
+        })
+        {
+            Timeout = Timeout.InfiniteTimeSpan
+        });
         services.AddSingleton<GlobalShortcutManager>();
         services.AddSingleton<IWindowOverlayHelper>(_ => WindowOverlayManager.Create());
         services.AddSingleton<IModelRegistry>(_ => new EngineCatalog());
@@ -215,7 +235,15 @@ public partial class App : Application
         services.AddSingleton<IAudioPlayer>(_ => AudioPlayerManager.Create());
         services.AddSingleton<ITtsEngineFactory, TtsEngineFactory>();
         services.AddSingleton<ITtsEngineProvider, TtsEngineProvider>();
+        services.AddSingleton<TtsEngineProvider>(sp => (TtsEngineProvider)sp.GetRequiredService<ITtsEngineProvider>());
         services.AddSingleton<ISpeechPipeline, SpeechPipeline>();
         services.AddSingleton<HotkeyManager>();
+
+        /* Presentation services and view models */
+        services.AddSingleton<MainWindow>();
+        services.AddSingleton<IWindowService, WindowService>();
+        services.AddSingleton<MainViewModel>();
+        services.AddTransient<SettingsViewModel>();
+        services.AddSingleton<Func<SettingsViewModel>>(sp => () => sp.GetRequiredService<SettingsViewModel>());
     }
 }

@@ -1,32 +1,24 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization.Metadata;
 using MoonTTS.Engine.Protocol;
 
 namespace MoonTTS.Engine.Mbrola;
 
 /* File Structure:
         - MbrolaWorker(Stream output)
-        - HandleAsync(EngineFrame frame) : Task<bool>
-        - WaitForIdleAsync() : Task
-        - HandleLoadModelAsync(EngineFrame frame) : Task
+        - GetMetadata() : EngineMetadataMessage
+        - ListVoices() : List<VoiceEntry>
+        - LoadModelAsync(LoadModelRequest request) : Task
         - EnsureEspeakInitialized() : void
-        - StartSynthesis(EngineFrame frame) : Task
         - SynthesizeAsync(SynthesizeRequest request, CancellationToken cancellationToken) : Task
         - RenderUtterance(string text, string voiceId, float speed, CancellationToken cancellationToken) : byte[]
         - OnSynthCallback(short* wav, int numSamples, IntPtr events) : int
-        - ResamplePcm16(ReadOnlySpan<short> input, int sourceRate, int targetRate) : byte[]
-        - SendAsync(EngineOpcode opcode, ReadOnlyMemory<byte> payload) : Task
-        - SendJsonAsync<T>(EngineOpcode opcode, T message, JsonTypeInfo<T> typeInfo) : Task
-        - SendErrorAsync(string code, string message) : Task
-        - Dispose() : void
+        - ResamplePcm16Cubic(ReadOnlySpan<short> input, int sourceRate, int targetRate) : byte[]
 */
 
-/* Answers the Moon-TTS engine protocol using eSpeak NG G2P + in-memory MBROLA diphone synthesis.
-   Synthesis runs on a background task so a Cancel frame can interrupt active speech immediately */
-public sealed class MbrolaWorker : IDisposable
+/* Answers the Moon-TTS engine protocol using eSpeak NG G2P + in-memory MBROLA diphone synthesis */
+public sealed class MbrolaWorker : EngineWorkerBase
 {
     private const string EngineId = "mbrola";
     private const int OutputSampleRate = 22050;
@@ -37,119 +29,62 @@ public sealed class MbrolaWorker : IDisposable
     private static MemoryStream? s_activeBuffer;
     private static CancellationToken s_activeCancellationToken;
 
-    private readonly Stream _output;
-    private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly object _synthLock = new();
-
     private bool _initialized;
     private bool _modelLoaded;
-    private Task? _activeSynthesis;
-    private CancellationTokenSource? _activeCts;
 
     /* Binds the worker to the protocol output stream */
-    public MbrolaWorker(Stream output)
+    public MbrolaWorker(Stream output) : base(output)
     {
-        _output = output;
     }
 
-    /* Dispatches one request frame. Returns false when the host asked the worker to shut down */
-    public async Task<bool> HandleAsync(EngineFrame frame)
+    /* Returns MBROLA metadata and 22.05 kHz mono 16-bit PCM format */
+    protected override EngineMetadataMessage GetMetadata() => new()
     {
-        switch (frame.Opcode)
+        EngineId = EngineId,
+        EngineName = "MBROLA Diphone Synthesizer",
+        Version = "1.0.0",
+        Author = "Moon-TTS",
+        AudioFormat = new EngineAudioFormat
         {
-            case EngineOpcode.Ping:
-                await SendAsync(EngineOpcode.Pong, ReadOnlyMemory<byte>.Empty);
-                return true;
+            SampleRate = OutputSampleRate,
+            Channels = 1,
+            BitDepth = 16
+        },
+        SupportsStreaming = false,
+        SupportsSpeedAdjustment = true,
+        SupportsPitchAdjustment = false
+    };
 
-            case EngineOpcode.GetMetadata:
-                await SendJsonAsync(EngineOpcode.MetadataResponse, new EngineMetadataMessage
-                {
-                    EngineId = EngineId,
-                    EngineName = "MBROLA Diphone Synthesizer",
-                    Version = "1.0.0",
-                    Author = "Moon-TTS",
-                    AudioFormat = new EngineAudioFormat
-                    {
-                        SampleRate = OutputSampleRate,
-                        Channels = 1,
-                        BitDepth = 16
-                    },
-                    SupportsStreaming = false,
-                    SupportsSpeedAdjustment = true,
-                    SupportsPitchAdjustment = false
-                }, EngineProtocolJsonContext.Default.EngineMetadataMessage);
-                return true;
-
-            case EngineOpcode.LoadModel:
-                await HandleLoadModelAsync(frame);
-                return true;
-
-            case EngineOpcode.ListVoices:
-                await SendJsonAsync(EngineOpcode.VoicesResponse,
-                    new VoicesResponse { Voices = MbrolaVoices.Describe() },
-                    EngineProtocolJsonContext.Default.VoicesResponse);
-                return true;
-
-            case EngineOpcode.Synthesize:
-                await StartSynthesis(frame);
-                return true;
-
-            case EngineOpcode.Cancel:
-                /* Cancel has no direct reply: the active synthesis aborts via the callback and ends with EndOfStream */
-                _activeCts?.Cancel();
-                return true;
-
-            case EngineOpcode.Shutdown:
-                return false;
-
-            default:
-                await SendErrorAsync("unsupported_opcode", $"Opcode {frame.Opcode} is not supported.");
-                return true;
-        }
-    }
-
-    /* Waits for the running synthesis (if any) so its terminal frame is written before exiting */
-    public async Task WaitForIdleAsync()
-    {
-        _activeCts?.Cancel();
-        if (_activeSynthesis != null)
-            await _activeSynthesis;
-    }
+    /* Returns all supported MBROLA diphone voices */
+    protected override List<VoiceEntry> ListVoices() => MbrolaVoices.Describe();
 
     /* Configures the MBROLA voice directory, verifies required voice files, and initializes libespeak-ng */
-    private async Task HandleLoadModelAsync(EngineFrame frame)
+    protected override Task LoadModelAsync(LoadModelRequest request)
     {
-        try
+        string bundledMbrolaDir = Path.Combine(AppContext.BaseDirectory, "espeak-ng-data", "mbrola");
+
+        if (!string.IsNullOrWhiteSpace(request.ModelDirectory))
         {
-            var request = EngineIpcProtocol.ReadJson(frame, EngineProtocolJsonContext.Default.LoadModelRequest);
-            string bundledMbrolaDir = Path.Combine(AppContext.BaseDirectory, "espeak-ng-data", "mbrola");
-
-            if (!string.IsNullOrWhiteSpace(request.ModelDirectory))
-            {
-                EspeakMbrolaNative.SetNativeEnvironmentVariable("MOON_MBROLA_DIR", request.ModelDirectory);
-            }
-
-            /* When the manifest specifies downloadable voice files, verify they exist in ModelDirectory or bundled dir */
-            foreach (string file in request.Files)
-            {
-                string downloadedPath = Path.Combine(request.ModelDirectory, file);
-                string bundledPath = Path.Combine(bundledMbrolaDir, file);
-                if (!File.Exists(downloadedPath) && !File.Exists(bundledPath))
-                {
-                    await SendErrorAsync("model_not_found",
-                        $"Missing MBROLA voice database '{file}' in '{request.ModelDirectory}'.");
-                    return;
-                }
-            }
-
-            EnsureEspeakInitialized();
-            _modelLoaded = true;
-            await SendAsync(EngineOpcode.ModelLoaded, ReadOnlyMemory<byte>.Empty);
+            EspeakMbrolaNative.SetNativeEnvironmentVariable("MOON_MBROLA_DIR", request.ModelDirectory);
         }
-        catch (Exception ex)
+
+        /* When the manifest specifies downloadable voice files, verify they exist in ModelDirectory or bundled dir */
+        foreach (string file in request.Files)
         {
-            await SendErrorAsync("model_load_failed", ex.Message);
+            string downloadedPath = Path.Combine(request.ModelDirectory, file);
+            string bundledPath = Path.Combine(bundledMbrolaDir, file);
+            if (!File.Exists(downloadedPath) && !File.Exists(bundledPath))
+            {
+                throw new WorkerErrorException(
+                    "model_not_found",
+                    $"Missing MBROLA voice database '{file}' in '{request.ModelDirectory}'.");
+            }
         }
+
+        EnsureEspeakInitialized();
+        _modelLoaded = true;
+        return Task.CompletedTask;
     }
 
     /* Initializes libespeak-ng once in synchronous callback mode */
@@ -181,74 +116,30 @@ public sealed class MbrolaWorker : IDisposable
         _initialized = true;
     }
 
-    /* Starts a synthesis job in the background; only one job may run at a time */
-    private async Task StartSynthesis(EngineFrame frame)
-    {
-        if (_activeSynthesis is { IsCompleted: false })
-        {
-            await SendErrorAsync("busy", "A synthesis job is already running.");
-            return;
-        }
-
-        SynthesizeRequest request;
-        try
-        {
-            request = EngineIpcProtocol.ReadJson(frame, EngineProtocolJsonContext.Default.SynthesizeRequest);
-        }
-        catch (Exception ex) when (ex is JsonException or InvalidDataException)
-        {
-            await SendErrorAsync("invalid_request", ex.Message);
-            return;
-        }
-
-        _activeCts?.Dispose();
-        _activeCts = new CancellationTokenSource();
-        var token = _activeCts.Token;
-        _activeSynthesis = Task.Run(() => SynthesizeAsync(request, token));
-    }
-
     /* Renders the text with the requested MBROLA voice and streams it back as one de-clicked PCM chunk */
-    private async Task SynthesizeAsync(SynthesizeRequest request, CancellationToken cancellationToken)
+    protected override async Task SynthesizeAsync(SynthesizeRequest request, CancellationToken cancellationToken)
     {
-        try
+        if (!_modelLoaded)
+            throw new WorkerErrorException("model_not_loaded", "No model is loaded.");
+
+        if (!MbrolaVoices.Ids.Contains(request.VoiceId))
+            throw new WorkerErrorException("unknown_voice", $"Voice '{request.VoiceId}' does not exist.");
+
+        if (string.IsNullOrWhiteSpace(request.Text))
+            return;
+
+        byte[] pcmBytes = RenderUtterance(
+            request.Text,
+            request.VoiceId,
+            request.Speed > 0 ? request.Speed : 1.0f,
+            cancellationToken);
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (pcmBytes.Length > 0)
         {
-            if (!_modelLoaded)
-            {
-                await SendErrorAsync("model_not_loaded", "No model is loaded.");
-                return;
-            }
-            if (!MbrolaVoices.Ids.Contains(request.VoiceId))
-            {
-                await SendErrorAsync("unknown_voice", $"Voice '{request.VoiceId}' does not exist.");
-                return;
-            }
-
-            if (!string.IsNullOrWhiteSpace(request.Text))
-            {
-                byte[] pcmBytes = RenderUtterance(
-                    request.Text,
-                    request.VoiceId,
-                    request.Speed > 0 ? request.Speed : 1.0f,
-                    cancellationToken);
-
-                cancellationToken.ThrowIfCancellationRequested();
-
-                if (pcmBytes.Length > 0)
-                {
-                    AudioDsp.ApplyDeClickingInPlace(pcmBytes, OutputSampleRate);
-                    await SendAsync(EngineOpcode.AudioChunk, pcmBytes);
-                }
-            }
-
-            await SendAsync(EngineOpcode.EndOfStream, ReadOnlyMemory<byte>.Empty);
-        }
-        catch (OperationCanceledException)
-        {
-            await SendAsync(EngineOpcode.EndOfStream, ReadOnlyMemory<byte>.Empty);
-        }
-        catch (Exception ex)
-        {
-            await SendErrorAsync("synthesis_failed", ex.Message);
+            AudioDsp.ApplyDeClickingInPlace(pcmBytes, OutputSampleRate);
+            await SendAudioChunkAsync(pcmBytes).ConfigureAwait(false);
         }
     }
 
@@ -310,27 +201,35 @@ public sealed class MbrolaWorker : IDisposable
                 return rawBytes;
 
             ReadOnlySpan<short> samples = MemoryMarshal.Cast<byte, short>(rawBytes.AsSpan());
-            return ResamplePcm16(samples, nativeRate, OutputSampleRate);
+            return ResamplePcm16Cubic(samples, nativeRate, OutputSampleRate);
         }
     }
 
-    /* Unmanaged C callback receiving 16-bit mono PCM chunks from libespeak-ng / MBROLA */
+    /* Unmanaged C callback receiving 16-bit mono PCM chunks from libespeak-ng / MBROLA.
+       Strictly catches all exceptions so a managed exception can never unwind across the native boundary */
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     private static unsafe int OnSynthCallback(short* wav, int numSamples, IntPtr events)
     {
-        if (s_activeCancellationToken.IsCancellationRequested)
-            return 1;
-
-        if (wav != null && numSamples > 0 && s_activeBuffer != null)
+        try
         {
-            ReadOnlySpan<byte> bytes = new(wav, numSamples * sizeof(short));
-            s_activeBuffer.Write(bytes);
+            if (s_activeCancellationToken.IsCancellationRequested)
+                return 1;
+
+            if (wav != null && numSamples > 0 && s_activeBuffer != null)
+            {
+                ReadOnlySpan<byte> bytes = new(wav, numSamples * sizeof(short));
+                s_activeBuffer.Write(bytes);
+            }
+            return 0;
         }
-        return 0;
+        catch
+        {
+            return 1;
+        }
     }
 
-    /* Linearly resamples 16-bit mono PCM from sourceRate (e.g. 16000 Hz) to targetRate (22050 Hz) */
-    private static byte[] ResamplePcm16(ReadOnlySpan<short> input, int sourceRate, int targetRate)
+    /* Resamples 16-bit mono PCM using 4-tap Catmull-Rom cubic interpolation for reduced aliasing artifacts */
+    private static byte[] ResamplePcm16Cubic(ReadOnlySpan<short> input, int sourceRate, int targetRate)
     {
         if (input.IsEmpty)
             return Array.Empty<byte>();
@@ -349,50 +248,22 @@ public sealed class MbrolaWorker : IDisposable
         {
             double srcPos = i * step;
             int idx = (int)srcPos;
-            if (idx >= lastIndex)
-            {
-                output[i] = input[lastIndex];
-            }
-            else
-            {
-                double frac = srcPos - idx;
-                double s0 = input[idx];
-                double s1 = input[idx + 1];
-                output[i] = (short)Math.Clamp(Math.Round(s0 + (s1 - s0) * frac), short.MinValue, short.MaxValue);
-            }
+            double t = srcPos - idx;
+
+            double y0 = input[Math.Clamp(idx - 1, 0, lastIndex)];
+            double y1 = input[Math.Clamp(idx, 0, lastIndex)];
+            double y2 = input[Math.Clamp(idx + 1, 0, lastIndex)];
+            double y3 = input[Math.Clamp(idx + 2, 0, lastIndex)];
+
+            double a0 = -0.5 * y0 + 1.5 * y1 - 1.5 * y2 + 0.5 * y3;
+            double a1 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3;
+            double a2 = -0.5 * y0 + 0.5 * y2;
+            double a3 = y1;
+
+            double value = ((a0 * t + a1) * t + a2) * t + a3;
+            output[i] = (short)Math.Clamp(Math.Round(value), short.MinValue, short.MaxValue);
         }
 
         return outputBytes;
-    }
-
-    /* Writes one frame to stdout under the write lock */
-    private async Task SendAsync(EngineOpcode opcode, ReadOnlyMemory<byte> payload)
-    {
-        await _writeLock.WaitAsync();
-        try
-        {
-            await EngineIpcProtocol.WriteFrameAsync(_output, opcode, payload);
-        }
-        finally
-        {
-            _writeLock.Release();
-        }
-    }
-
-    /* Serializes and writes a JSON control frame */
-    private Task SendJsonAsync<T>(EngineOpcode opcode, T message, JsonTypeInfo<T> typeInfo) =>
-        SendAsync(opcode, JsonSerializer.SerializeToUtf8Bytes(message, typeInfo));
-
-    /* Writes the terminal Error frame of a failed request */
-    private Task SendErrorAsync(string code, string message) =>
-        SendJsonAsync(EngineOpcode.Error, new EngineErrorMessage { Code = code, Message = message },
-            EngineProtocolJsonContext.Default.EngineErrorMessage);
-
-    /* Releases synchronization primitives */
-    public void Dispose()
-    {
-        _activeCts?.Cancel();
-        _activeCts?.Dispose();
-        _writeLock.Dispose();
     }
 }

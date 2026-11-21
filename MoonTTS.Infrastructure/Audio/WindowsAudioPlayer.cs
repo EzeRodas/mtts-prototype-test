@@ -1,9 +1,6 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Threading;
-using System.Threading.Tasks;
+using MoonTTS.Core.Utilities;
 using MoonTTS.Domain.Audio;
 using MoonTTS.Domain.Common;
 using MoonTTS.Domain.Entities;
@@ -20,71 +17,93 @@ namespace MoonTTS.Infrastructure.Audio;
         - Pause() : void
         - Resume() : void
         - Stop() : void
-        - TryResolveDeviceNumber(string deviceId, out int deviceNumber) : bool
-        - OpenTarget(int deviceNumber, AudioFormat format, Func<float> volumeProvider) : Result<WaveOutTarget>
-        - EnqueueBuffer(WaveOutTarget target, ReadOnlySpan<byte> pcmSlice, byte[] scratchBuffer) : Result
-        - ReapCompletedBuffers(WaveOutTarget target) : int
-        - WaitForTargetCapacityAsync(WaveOutTarget target, int maxInFlight, CancellationToken token) : Task
-        - DrainTargetAsync(WaveOutTarget target, CancellationToken token) : Task
+        - OpenTarget(string deviceId, AudioFormat format, Func<float> volumeProvider) : Result<WasapiTarget>
+        - ResolveEndpoint(nint enumerator, string deviceId) : nint
+        - WriteChunkToTargetAsync(WasapiTarget target, ReadOnlyMemory<byte> chunk, CancellationToken token) : Task<Result>
+        - DrainTargetAsync(WasapiTarget target, CancellationToken token) : Task
+        - WaitForBufferSpaceAsync(WasapiTarget target, int timeoutMs, CancellationToken token) : Task
         - WaitHandleAsync(WaitHandle handle, int timeoutMs, CancellationToken token) : Task<bool>
-        - DisposeTarget(WaveOutTarget target) : void
-        - ExtractDeviceName(ref LibWinMm.WAVEOUTCAPSW caps, uint index) : string
-        - PreparedWaveBuffer
-        - WaveOutTarget
-        - LibWinMm
+        - DisposeTarget(WasapiTarget target) : void
+        - ReadDeviceId(nint device) : string?
+        - ReadFriendlyName(nint device, int fallbackIndex) : string
+        - EnsureComInitialized() : bool
+        - WasapiTarget
+        - LibWasapi
 */
 
+/* Windows audio player adapter built directly on WASAPI (IMMDeviceEnumerator / IAudioClient / IAudioRenderClient)
+   via AOT-safe COM vtable calls. Provides full untruncated device names, stable Windows Endpoint GUIDs,
+   OS-native sample-rate conversion (AUTOCONVERTPCM), low-latency shared-mode playback, and dual-device routing */
 public class WindowsAudioPlayer : IAudioPlayer
 {
-    private const int DefaultDevice = -1; /* -1 is WAVE_MAPPER (default for Windows) */
-    private const int DisabledDevice = -2; /* -2 is disabled */
-    private const int MaxInFlightBuffers = 8; /* ~400ms max queued audio per sink at 50ms slices */
+    private const string DefaultDeviceId = "-1";
+    private const long SharedBufferDuration100Ns = 100 * 10_000; /* 100ms shared-mode ring buffer */
+    private const int WaitTimeoutMs = 15;
 
-    private readonly List<WaveOutTarget> _activeTargets = new();
+    private readonly List<WasapiTarget> _activeTargets = new();
+    private readonly Lock _processLock = new();
 
-    private int _primaryDeviceNumber = DefaultDevice; /* -1 is default for Windows */
-    private int _monitorDeviceNumber = DisabledDevice; /* -2 is disabled */
+    private string? _primaryDeviceId = DefaultDeviceId;
+    private string? _monitorDeviceId;
 
     private float _primaryVolume = 1.0f;
     private float _monitorVolume = 1.0f;
 
     private CancellationTokenSource? _playbackCts;
-    private readonly Lock _processLock = new();
     private bool _isPaused;
 
-    /* Returns a list with all the available Windows audio output devices visible by the application */
+    /* Enumerates active Windows WASAPI render endpoints with full untruncated friendly names and stable endpoint IDs */
     public unsafe Result<List<AudioDeviceInfo>> GetAvailableDevices()
     {
+        bool uninitCom = EnsureComInitialized();
+        nint enumerator = 0;
+        nint collection = 0;
+
         try
         {
             var devices = new List<AudioDeviceInfo>
             {
                 new AudioDeviceInfo
                 {
-                    DeviceId = "-1",
+                    DeviceId = DefaultDeviceId,
                     DeviceName = "Default System Device",
                 }
             };
 
-            uint count = LibWinMm.waveOutGetNumDevs();
+            enumerator = CreateDeviceEnumerator();
+            if (enumerator == 0)
+                return Result<List<AudioDeviceInfo>>.Failure("Failed to create WASAPI IMMDeviceEnumerator.");
 
-            /* Adds them one by one to the list */
+            int hr = LibWasapi.EnumAudioEndpoints(enumerator, LibWasapi.EDataFlowRender, LibWasapi.DeviceStateActive, out collection);
+            if (hr < 0 || collection == 0)
+                return Result<List<AudioDeviceInfo>>.Failure($"WASAPI EnumAudioEndpoints failed (HRESULT 0x{hr:X8}).");
+
+            hr = LibWasapi.CollectionGetCount(collection, out uint count);
+            if (hr < 0)
+                return Result<List<AudioDeviceInfo>>.Failure($"WASAPI GetCount failed (HRESULT 0x{hr:X8}).");
+
             for (uint i = 0; i < count; i++)
             {
-                int mmResult = LibWinMm.waveOutGetDevCapsW(
-                    (nuint)i,
-                    out LibWinMm.WAVEOUTCAPSW caps,
-                    (uint)sizeof(LibWinMm.WAVEOUTCAPSW));
+                if (LibWasapi.CollectionItem(collection, i, out nint device) < 0 || device == 0)
+                    continue;
 
-                string name = mmResult == LibWinMm.MMSYSERR_NOERROR
-                    ? ExtractDeviceName(ref caps, i)
-                    : $"Audio Output Device {i}";
-
-                devices.Add(new AudioDeviceInfo
+                try
                 {
-                    DeviceId = i.ToString(),
-                    DeviceName = name,
-                });
+                    string? id = ReadDeviceId(device);
+                    if (string.IsNullOrWhiteSpace(id))
+                        continue;
+
+                    string name = ReadFriendlyName(device, (int)i);
+                    devices.Add(new AudioDeviceInfo
+                    {
+                        DeviceId = id,
+                        DeviceName = name
+                    });
+                }
+                finally
+                {
+                    LibWasapi.Release(device);
+                }
             }
 
             return Result<List<AudioDeviceInfo>>.Success(devices);
@@ -92,11 +111,17 @@ public class WindowsAudioPlayer : IAudioPlayer
         catch (Exception ex)
         {
             return Result<List<AudioDeviceInfo>>.Failure(
-                $"Failed to retrieve Windows audio devices: {ex.Message}", ex);
+                $"Failed to retrieve Windows WASAPI audio devices: {ex.Message}", ex);
+        }
+        finally
+        {
+            if (collection != 0) LibWasapi.Release(collection);
+            if (enumerator != 0) LibWasapi.Release(enumerator);
+            if (uninitCom) LibWasapi.CoUninitialize();
         }
     }
 
-    /* Sets the primary and monitoring (If enabled) audio device output */
+    /* Sets the primary and monitor audio output endpoint IDs ("-1" for system default, null/empty to disable) */
     public Result SetOutputDevices(
         string? primaryDeviceId = IAudioPlayer.KeepCurrent,
         string? monitorDeviceId = IAudioPlayer.KeepCurrent)
@@ -105,40 +130,32 @@ public class WindowsAudioPlayer : IAudioPlayer
         {
             if (primaryDeviceId != IAudioPlayer.KeepCurrent)
             {
-                /* Sets the main output if it is not null */
-                if (!string.IsNullOrWhiteSpace(primaryDeviceId))
-                {
-                    if (!TryResolveDeviceNumber(primaryDeviceId, out int primaryId))
-                        return Result.Failure($"Invalid primary audio device ID '{primaryDeviceId}'");
-                    /* Gets the ID from the primaryDeviceId */
-                    _primaryDeviceNumber = primaryId;
-                }
-                else
-                {
-                    _primaryDeviceNumber = DisabledDevice; /* Disabled */
-                }
+                _primaryDeviceId = !string.IsNullOrWhiteSpace(primaryDeviceId) ? primaryDeviceId.Trim() : null;
             }
 
             if (monitorDeviceId != IAudioPlayer.KeepCurrent)
             {
-                /* Sets the monitoring output if it is not null */
-                if (!string.IsNullOrWhiteSpace(monitorDeviceId))
-                {
-                    if (!TryResolveDeviceNumber(monitorDeviceId, out int monitorId))
-                        return Result.Failure($"Invalid monitor audio device ID '{monitorDeviceId}'");
-                    _monitorDeviceNumber = monitorId;
-                }
-                else
-                {
-                    _monitorDeviceNumber = DisabledDevice;
-                }
+                _monitorDeviceId = !string.IsNullOrWhiteSpace(monitorDeviceId) ? monitorDeviceId.Trim() : null;
             }
         }
 
         return Result.Success();
     }
 
-    /* Plays a single memory buffer of raw PCM audio data via Windows audio output */
+    /* Sets live volume attenuation factors for primary and monitor sinks */
+    public void SetVolume(int? primaryVolume = null, int? monitorVolume = null)
+    {
+        lock (_processLock)
+        {
+            if (primaryVolume.HasValue)
+                _primaryVolume = Math.Clamp(primaryVolume.Value, 0, 100) / 100.0f;
+
+            if (monitorVolume.HasValue)
+                _monitorVolume = Math.Clamp(monitorVolume.Value, 0, 100) / 100.0f;
+        }
+    }
+
+    /* Plays a single memory buffer of raw PCM audio data via WASAPI */
     public async Task<Result> PlayPcmAsync(
         ReadOnlyMemory<byte> pcmBytes,
         AudioFormat format,
@@ -153,113 +170,117 @@ public class WindowsAudioPlayer : IAudioPlayer
         return await StreamPcmAsync(SingleChunk(), format, cancellationToken);
     }
 
-    /* Streams incoming PCM chunks sequentially and gaplessly on Windows to primary and monitor outputs */
+    /* Streams incoming PCM chunks gaplessly and concurrently to configured WASAPI primary and monitor endpoints */
     public async Task<Result> StreamPcmAsync(
         IAsyncEnumerable<ReadOnlyMemory<byte>> pcmChunks,
         AudioFormat format,
         CancellationToken cancellationToken = default)
     {
-        int primaryDev;
-        int monitorDev;
+        string? primaryId;
+        string? monitorId;
 
         lock (_processLock)
         {
-            primaryDev = _primaryDeviceNumber;
-            monitorDev = _monitorDeviceNumber;
+            primaryId = _primaryDeviceId;
+            monitorId = _monitorDeviceId;
         }
 
-        bool playPrimary = primaryDev >= DefaultDevice;
-        bool playMonitor = monitorDev >= DefaultDevice;
+        bool playPrimary = !string.IsNullOrEmpty(primaryId);
+        bool playMonitor = !string.IsNullOrEmpty(monitorId);
 
         if (!playPrimary && !playMonitor)
             return Result.Success();
 
         Stop();
 
+        CancellationTokenSource sessionCts;
         CancellationToken linkedToken;
         lock (_processLock)
         {
-            _playbackCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            linkedToken = _playbackCts.Token;
+            sessionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _playbackCts = sessionCts;
+            linkedToken = sessionCts.Token;
             _isPaused = false;
         }
 
-        var sessionTargets = new List<WaveOutTarget>();
-
-        if (playPrimary)
-        {
-            var primaryTarget = OpenTarget(primaryDev, format, () => _primaryVolume);
-            if (primaryTarget.IsSuccess && primaryTarget.Value != null)
-            {
-                lock (_processLock)
-                {
-                    _activeTargets.Add(primaryTarget.Value);
-                }
-                sessionTargets.Add(primaryTarget.Value);
-            }
-        }
-
-        if (playMonitor)
-        {
-            var monitorTarget = OpenTarget(monitorDev, format, () => _monitorVolume);
-            if (monitorTarget.IsSuccess && monitorTarget.Value != null)
-            {
-                lock (_processLock)
-                {
-                    _activeTargets.Add(monitorTarget.Value);
-                }
-                sessionTargets.Add(monitorTarget.Value);
-            }
-        }
-
-        if (sessionTargets.Count == 0)
-            return Result.Failure("Failed to initialize any Windows audio output stream targets.");
-
-        int bytesPerSample = Math.Max(format.BitDepth / 8, 1);
-        int blockAlign = Math.Max(format.Channels * bytesPerSample, 1);
-        int bytesPerSecond = Math.Max(format.SampleRate * blockAlign, blockAlign);
-        /* ~50ms slice aligned to block boundary */
-        int sliceSize = Math.Max((bytesPerSecond / 20) / blockAlign * blockAlign, blockAlign);
-        byte[] scratchBuffer = new byte[sliceSize];
+        var sessionTargets = new List<WasapiTarget>(2);
+        string? lastOpenError = null;
 
         try
         {
-            await foreach (var chunk in pcmChunks.WithCancellation(linkedToken))
+            if (playPrimary)
             {
-                if (chunk.Length == 0)
-                    continue;
-
-                int remaining = chunk.Length;
-                int offset = 0;
-
-                while (remaining > 0 && !linkedToken.IsCancellationRequested)
+                var primaryTarget = OpenTarget(primaryId!, format, () => Volatile.Read(ref _primaryVolume));
+                if (primaryTarget.IsSuccess)
                 {
-                    int bytesToWrite = Math.Min(remaining, sliceSize);
-                    /* Keep multi-byte samples aligned */
-                    if (bytesToWrite > blockAlign)
-                        bytesToWrite -= bytesToWrite % blockAlign;
-
-                    foreach (var target in sessionTargets)
-                    {
-                        await WaitForTargetCapacityAsync(target, MaxInFlightBuffers, linkedToken);
-                        if (linkedToken.IsCancellationRequested)
-                            break;
-
-                        var slice = chunk.Span.Slice(offset, bytesToWrite);
-                        var enqueueRes = EnqueueBuffer(target, slice, scratchBuffer);
-                        if (enqueueRes.IsFailure)
-                            return enqueueRes;
-                    }
-
-                    offset += bytesToWrite;
-                    remaining -= bytesToWrite;
+                    lock (_processLock) { _activeTargets.Add(primaryTarget.Value); }
+                    sessionTargets.Add(primaryTarget.Value);
+                }
+                else
+                {
+                    lastOpenError = primaryTarget.ErrorMessage;
                 }
             }
 
-            /* Wait for all queued hardware buffers to finish playing */
-            foreach (var target in sessionTargets)
+            if (playMonitor)
             {
-                await DrainTargetAsync(target, linkedToken);
+                var monitorTarget = OpenTarget(monitorId!, format, () => Volatile.Read(ref _monitorVolume));
+                if (monitorTarget.IsSuccess)
+                {
+                    lock (_processLock) { _activeTargets.Add(monitorTarget.Value); }
+                    sessionTargets.Add(monitorTarget.Value);
+                }
+                else
+                {
+                    lastOpenError = monitorTarget.ErrorMessage;
+                }
+            }
+
+            if (sessionTargets.Count == 0)
+                return Result.Failure(lastOpenError ?? "Failed to initialize any Windows WASAPI audio output targets.");
+
+            await foreach (var chunk in pcmChunks.WithCancellation(linkedToken))
+            {
+                if (chunk.IsEmpty)
+                    continue;
+
+                if (sessionTargets.Count == 1)
+                {
+                    var res = await WriteChunkToTargetAsync(sessionTargets[0], chunk, linkedToken);
+                    if (res.IsFailure)
+                        return res;
+                }
+                else
+                {
+                    var tasks = new Task<Result>[sessionTargets.Count];
+                    for (int i = 0; i < sessionTargets.Count; i++)
+                        tasks[i] = WriteChunkToTargetAsync(sessionTargets[i], chunk, linkedToken);
+
+                    Result[] results = await Task.WhenAll(tasks);
+                    int succeeded = 0;
+                    Result? firstFailure = null;
+                    foreach (var r in results)
+                    {
+                        if (r.IsSuccess) succeeded++;
+                        else firstFailure ??= r;
+                    }
+
+                    if (succeeded == 0 && firstFailure.HasValue)
+                        return firstFailure.Value;
+                }
+            }
+
+            /* Wait concurrently for all hardware render buffers to finish draining */
+            if (sessionTargets.Count == 1)
+            {
+                await DrainTargetAsync(sessionTargets[0], linkedToken);
+            }
+            else
+            {
+                var drainTasks = new Task[sessionTargets.Count];
+                for (int i = 0; i < sessionTargets.Count; i++)
+                    drainTasks[i] = DrainTargetAsync(sessionTargets[i], linkedToken);
+                await Task.WhenAll(drainTasks);
             }
 
             return Result.Success();
@@ -270,32 +291,30 @@ public class WindowsAudioPlayer : IAudioPlayer
         }
         catch (Exception ex)
         {
+            AppLogger.Error("WindowsAudioPlayer", "WASAPI streaming failed", ex);
             return Result.Failure($"Streaming Windows audio failed: {ex.Message}", ex);
         }
         finally
         {
-            Stop();
-        }
-    }
-
-    /* The self-explanatory ones */
-
-    /* Sets volume levels for primary and monitor outputs (applied live per 50ms PCM slice) */
-    public void SetVolume(int? primaryVolume = null, int? monitorVolume = null)
-    {
-        lock (_processLock)
-        {
-            if (primaryVolume.HasValue)
+            lock (_processLock)
             {
-                _primaryVolume = Math.Clamp(primaryVolume.Value, 0, 100) / 100.0f;
-            }
+                foreach (var target in sessionTargets)
+                {
+                    _activeTargets.Remove(target);
+                    DisposeTarget(target);
+                }
 
-            if (!monitorVolume.HasValue) return;
-            _monitorVolume = Math.Clamp(monitorVolume.Value, 0, 100) / 100.0f;
+                if (ReferenceEquals(_playbackCts, sessionCts))
+                    _playbackCts = null;
+
+                if (_activeTargets.Count == 0)
+                    _isPaused = false;
+            }
+            sessionCts.Dispose();
         }
     }
 
-    /* Pauses active Windows waveOut playback handles */
+    /* Pauses all active WASAPI audio clients */
     public void Pause()
     {
         lock (_processLock)
@@ -303,16 +322,14 @@ public class WindowsAudioPlayer : IAudioPlayer
             if (_isPaused) return;
             foreach (var target in _activeTargets)
             {
-                if (!target.IsDisposed && target.Handle != 0)
-                {
-                    LibWinMm.waveOutPause(target.Handle);
-                }
+                if (!target.IsDisposed && target.AudioClient != 0)
+                    LibWasapi.AudioClientStop(target.AudioClient);
             }
             _isPaused = true;
         }
     }
 
-    /* Resumes paused Windows waveOut playback handles */
+    /* Resumes all paused WASAPI audio clients */
     public void Resume()
     {
         lock (_processLock)
@@ -320,26 +337,24 @@ public class WindowsAudioPlayer : IAudioPlayer
             if (!_isPaused) return;
             foreach (var target in _activeTargets)
             {
-                if (!target.IsDisposed && target.Handle != 0)
+                if (!target.IsDisposed && target.AudioClient != 0)
                 {
-                    LibWinMm.waveOutRestart(target.Handle);
-                    target.BufferDoneEvent.Set();
+                    LibWasapi.AudioClientStart(target.AudioClient);
+                    target.BufferEvent?.Set();
                 }
             }
             _isPaused = false;
         }
     }
 
-    /* Immediately stops playback, resets hardware queues, and releases unmanaged audio buffers */
+    /* Cancels active playback, stops and resets hardware clients, and releases COM interfaces */
     public void Stop()
     {
         lock (_processLock)
         {
+            /* Cancel-only; the owning StreamPcmAsync session disposes its CTS in finally */
             _playbackCts?.Cancel();
-            _playbackCts?.Dispose();
-            _playbackCts = null;
 
-            /* Process gets disposed after finished */
             foreach (var target in _activeTargets)
             {
                 DisposeTarget(target);
@@ -350,232 +365,315 @@ public class WindowsAudioPlayer : IAudioPlayer
         }
     }
 
-    /* Resolves a device ID or device display name to a WinMM waveOut device index (-1 for default) */
-    private bool TryResolveDeviceNumber(string deviceId, out int deviceNumber)
-    {
-        if (int.TryParse(deviceId, out int parsed) && parsed >= DefaultDevice)
-        {
-            deviceNumber = parsed;
-            return true;
-        }
-
-        var devicesResult = GetAvailableDevices();
-        if (devicesResult.IsSuccess && devicesResult.Value != null)
-        {
-            var matched = devicesResult.Value.FirstOrDefault(d =>
-                string.Equals(d.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(d.DeviceName, deviceId, StringComparison.OrdinalIgnoreCase));
-
-            if (matched != null && int.TryParse(matched.DeviceId, out int matchedId))
-            {
-                deviceNumber = matchedId;
-                return true;
-            }
-        }
-
-        deviceNumber = DisabledDevice;
-        return false;
-    }
-
-    /* Opens a WinMM waveOut handle for the specified device and PCM format */
-    private static Result<WaveOutTarget> OpenTarget(
-        int deviceNumber,
+    /* Opens and starts a shared-mode WASAPI render client with OS automatic sample-rate conversion */
+    private static unsafe Result<WasapiTarget> OpenTarget(
+        string deviceId,
         AudioFormat format,
         Func<float> volumeProvider)
     {
-        int channels = Math.Max((int)format.Channels, 1);
-        int bitDepth = Math.Max((int)format.BitDepth, 8);
-        int sampleRate = Math.Max(format.SampleRate, 8000);
-        int bytesPerSample = Math.Max(bitDepth / 8, 1);
-        ushort blockAlign = (ushort)Math.Max(channels * bytesPerSample, 1);
+        bool uninitCom = EnsureComInitialized();
+        nint enumerator = 0;
+        nint device = 0;
+        nint audioClient = 0;
+        nint renderClient = 0;
+        AutoResetEvent? bufferEvent = null;
 
-        var wfx = new LibWinMm.WAVEFORMATEX
+        try
         {
-            wFormatTag = LibWinMm.WAVE_FORMAT_PCM,
-            nChannels = (ushort)channels,
-            nSamplesPerSec = (uint)sampleRate,
-            nAvgBytesPerSec = (uint)(sampleRate * blockAlign),
-            nBlockAlign = blockAlign,
-            wBitsPerSample = (ushort)bitDepth,
-            cbSize = 0
-        };
+            enumerator = CreateDeviceEnumerator();
+            if (enumerator == 0)
+                return Result<WasapiTarget>.Failure("Failed to create WASAPI IMMDeviceEnumerator.");
 
-        uint totalDevices = LibWinMm.waveOutGetNumDevs();
-        uint targetDeviceId = (deviceNumber < 0 || deviceNumber >= totalDevices)
-            ? LibWinMm.WAVE_MAPPER
-            : (uint)deviceNumber;
+            device = ResolveEndpoint(enumerator, deviceId);
+            if (device == 0)
+                return Result<WasapiTarget>.Failure($"Failed to resolve Windows audio endpoint '{deviceId}'.");
 
-        var doneEvent = new AutoResetEvent(false);
-        nint eventHandle = doneEvent.SafeWaitHandle.DangerousGetHandle();
+            Guid iidAudioClient = LibWasapi.IID_IAudioClient;
+            int hr = LibWasapi.DeviceActivate(device, ref iidAudioClient, LibWasapi.CLSCTX_ALL, 0, out audioClient);
+            if (hr < 0 || audioClient == 0)
+                return Result<WasapiTarget>.Failure($"WASAPI IMMDevice.Activate failed (HRESULT 0x{hr:X8}).");
 
-        int mmResult = LibWinMm.waveOutOpen(
-            out nint hWaveOut,
-            targetDeviceId,
-            ref wfx,
-            eventHandle,
-            0,
-            LibWinMm.CALLBACK_EVENT);
+            int channels = Math.Max((int)format.Channels, 1);
+            int bitDepth = Math.Max((int)format.BitDepth, 8);
+            int sampleRate = Math.Max(format.SampleRate, 8000);
+            int bytesPerSample = Math.Max(bitDepth / 8, 1);
+            ushort blockAlign = (ushort)Math.Max(channels * bytesPerSample, 1);
 
-        /* Fall back to WAVE_MAPPER if a previously saved device index is unavailable */
-        if (mmResult != LibWinMm.MMSYSERR_NOERROR && targetDeviceId != LibWinMm.WAVE_MAPPER)
-        {
-            mmResult = LibWinMm.waveOutOpen(
-                out hWaveOut,
-                LibWinMm.WAVE_MAPPER,
-                ref wfx,
-                eventHandle,
+            var wfx = new LibWasapi.WAVEFORMATEX
+            {
+                wFormatTag = LibWasapi.WAVE_FORMAT_PCM,
+                nChannels = (ushort)channels,
+                nSamplesPerSec = (uint)sampleRate,
+                nAvgBytesPerSec = (uint)(sampleRate * blockAlign),
+                nBlockAlign = blockAlign,
+                wBitsPerSample = (ushort)bitDepth,
+                cbSize = 0
+            };
+
+            uint baseFlags = LibWasapi.AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | LibWasapi.AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+            bool useEventCallback = true;
+
+            hr = LibWasapi.AudioClientInitialize(
+                audioClient,
+                LibWasapi.AUDCLNT_SHAREMODE_SHARED,
+                baseFlags | LibWasapi.AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                SharedBufferDuration100Ns,
                 0,
-                LibWinMm.CALLBACK_EVENT);
-        }
+                ref wfx,
+                0);
 
-        if (mmResult != LibWinMm.MMSYSERR_NOERROR || hWaveOut == 0)
+            /* Fallback without EVENTCALLBACK on older drivers that reject event-driven autoconvert */
+            if (hr < 0)
+            {
+                useEventCallback = false;
+                hr = LibWasapi.AudioClientInitialize(
+                    audioClient,
+                    LibWasapi.AUDCLNT_SHAREMODE_SHARED,
+                    baseFlags,
+                    SharedBufferDuration100Ns,
+                    0,
+                    ref wfx,
+                    0);
+            }
+
+            if (hr < 0)
+                return Result<WasapiTarget>.Failure($"WASAPI IAudioClient.Initialize failed (HRESULT 0x{hr:X8}).");
+
+            if (useEventCallback)
+            {
+                bufferEvent = new AutoResetEvent(false);
+                hr = LibWasapi.AudioClientSetEventHandle(audioClient, bufferEvent.SafeWaitHandle.DangerousGetHandle());
+                if (hr < 0)
+                {
+                    bufferEvent.Dispose();
+                    bufferEvent = null;
+                }
+            }
+
+            hr = LibWasapi.AudioClientGetBufferSize(audioClient, out uint bufferFrameCount);
+            if (hr < 0 || bufferFrameCount == 0)
+                return Result<WasapiTarget>.Failure($"WASAPI GetBufferSize failed (HRESULT 0x{hr:X8}).");
+
+            Guid iidRenderClient = LibWasapi.IID_IAudioRenderClient;
+            hr = LibWasapi.AudioClientGetService(audioClient, ref iidRenderClient, out renderClient);
+            if (hr < 0 || renderClient == 0)
+                return Result<WasapiTarget>.Failure($"WASAPI GetService(IAudioRenderClient) failed (HRESULT 0x{hr:X8}).");
+
+            hr = LibWasapi.AudioClientStart(audioClient);
+            if (hr < 0)
+                return Result<WasapiTarget>.Failure($"WASAPI IAudioClient.Start failed (HRESULT 0x{hr:X8}).");
+
+            var target = new WasapiTarget(
+                audioClient,
+                renderClient,
+                bufferEvent,
+                bufferFrameCount,
+                blockAlign,
+                bitDepth,
+                sampleRate,
+                volumeProvider);
+
+            /* Ownership transferred to target; clear locals so finally doesn't release them */
+            audioClient = 0;
+            renderClient = 0;
+            bufferEvent = null;
+            return Result<WasapiTarget>.Success(target);
+        }
+        catch (Exception ex)
         {
-            doneEvent.Dispose();
-            return Result<WaveOutTarget>.Failure($"waveOutOpen failed with MMRESULT {mmResult}.");
+            return Result<WasapiTarget>.Failure($"Failed to open WASAPI audio target: {ex.Message}", ex);
         }
-
-        return Result<WaveOutTarget>.Success(new WaveOutTarget(hWaveOut, doneEvent, volumeProvider));
+        finally
+        {
+            bufferEvent?.Dispose();
+            if (renderClient != 0) LibWasapi.Release(renderClient);
+            if (audioClient != 0) LibWasapi.Release(audioClient);
+            if (device != 0) LibWasapi.Release(device);
+            if (enumerator != 0) LibWasapi.Release(enumerator);
+            if (uninitCom) LibWasapi.CoUninitialize();
+        }
     }
 
-    /* Scales PCM samples by the target's live volume and queues an unmanaged WAVEHDR buffer to WinMM */
-    private unsafe Result EnqueueBuffer(
-        WaveOutTarget target,
-        ReadOnlySpan<byte> pcmSlice,
-        byte[] scratchBuffer)
+    /* Resolves a WASAPI endpoint ID, legacy numeric index, or display name, falling back to system default */
+    private static unsafe nint ResolveEndpoint(nint enumerator, string deviceId)
     {
-        lock (_processLock)
+        if (string.IsNullOrWhiteSpace(deviceId) || deviceId == DefaultDeviceId)
         {
-            if (target.IsDisposed || target.Handle == 0)
-                return Result.Failure("Audio output target was closed.");
+            LibWasapi.GetDefaultAudioEndpoint(enumerator, LibWasapi.EDataFlowRender, LibWasapi.ERoleConsole, out nint defDev);
+            return defDev;
+        }
 
-            ReapCompletedBuffers(target);
-
-            int length = pcmSlice.Length;
-            Span<byte> scaledSpan = scratchBuffer.AsSpan(0, length);
-            pcmSlice.CopyTo(scaledSpan);
-
-            float liveVolume = target.VolumeProvider();
-            SimdAudioProcessor.ScaleVolumeInPlace(scaledSpan, liveVolume);
-
-            nint hdrPtr;
-            nint dataPtr;
-            int capacity;
-            if (target.FreePool.TryPop(out PreparedWaveBuffer pooled))
+        /* Direct lookup by stable WASAPI endpoint ID */
+        fixed (char* idPtr = deviceId)
+        {
+            if (LibWasapi.GetDevice(enumerator, idPtr, out nint directDev) >= 0 && directDev != 0)
             {
-                hdrPtr = pooled.HeaderPtr;
-                NativeMemory.Clear((void*)hdrPtr, (nuint)sizeof(LibWinMm.WAVEHDR));
-                if (pooled.Capacity >= length)
+                if (LibWasapi.DeviceGetState(directDev, out uint state) >= 0 && state == LibWasapi.DeviceStateActive)
+                    return directDev;
+
+                LibWasapi.Release(directDev);
+            }
+        }
+
+        /* Fallback for legacy WinMM numeric IDs or friendly names stored in older settings.json files */
+        if (LibWasapi.EnumAudioEndpoints(enumerator, LibWasapi.EDataFlowRender, LibWasapi.DeviceStateActive, out nint collection) >= 0
+            && collection != 0)
+        {
+            try
+            {
+                if (LibWasapi.CollectionGetCount(collection, out uint count) >= 0)
                 {
-                    dataPtr = pooled.DataPtr;
-                    capacity = pooled.Capacity;
+                    if (int.TryParse(deviceId, out int legacyIdx) && legacyIdx >= 0 && legacyIdx < count)
+                    {
+                        if (LibWasapi.CollectionItem(collection, (uint)legacyIdx, out nint byIndex) >= 0 && byIndex != 0)
+                            return byIndex;
+                    }
+
+                    for (uint i = 0; i < count; i++)
+                    {
+                        if (LibWasapi.CollectionItem(collection, i, out nint candidate) < 0 || candidate == 0)
+                            continue;
+
+                        string name = ReadFriendlyName(candidate, (int)i);
+                        if (string.Equals(name, deviceId, StringComparison.OrdinalIgnoreCase))
+                            return candidate;
+
+                        LibWasapi.Release(candidate);
+                    }
+                }
+            }
+            finally
+            {
+                LibWasapi.Release(collection);
+            }
+        }
+
+        /* Device was unplugged: fall back gracefully to system default render endpoint */
+        LibWasapi.GetDefaultAudioEndpoint(enumerator, LibWasapi.EDataFlowRender, LibWasapi.ERoleConsole, out nint fallback);
+        return fallback;
+    }
+
+    /* Copies and SIMD-scales one PCM chunk directly into the WASAPI render ring buffer */
+    private async Task<Result> WriteChunkToTargetAsync(
+        WasapiTarget target,
+        ReadOnlyMemory<byte> chunk,
+        CancellationToken token)
+    {
+        int blockAlign = target.BlockAlign;
+        int totalFrames = chunk.Length / blockAlign;
+        int frameOffset = 0;
+
+        while (frameOffset < totalFrames && !token.IsCancellationRequested)
+        {
+            uint availableFrames;
+            int copyResult = 0;
+            int framesToWrite = 0;
+
+            lock (_processLock)
+            {
+                if (target.IsDisposed || target.AudioClient == 0 || target.RenderClient == 0)
+                    return Result.Failure("WASAPI audio output target was closed.");
+
+                if (_isPaused)
+                {
+                    availableFrames = 0;
                 }
                 else
                 {
-                    NativeMemory.Free((void*)pooled.DataPtr);
-                    dataPtr = (nint)NativeMemory.Alloc((nuint)length);
-                    capacity = length;
+                    int padHr = LibWasapi.AudioClientGetCurrentPadding(target.AudioClient, out uint padding);
+                    if (padHr < 0)
+                        return Result.Failure($"WASAPI GetCurrentPadding failed (HRESULT 0x{padHr:X8}).");
+
+                    availableFrames = target.BufferFrameCount > padding
+                        ? target.BufferFrameCount - padding
+                        : 0;
+
+                    if (availableFrames > 0)
+                    {
+                        framesToWrite = (int)Math.Min(availableFrames, (uint)(totalFrames - frameOffset));
+                        copyResult = WriteFramesDirectly(
+                            target,
+                            chunk.Span.Slice(frameOffset * blockAlign, framesToWrite * blockAlign),
+                            framesToWrite);
+                    }
                 }
             }
-            else
+
+            if (copyResult < 0)
+                return Result.Failure($"WASAPI buffer write failed (HRESULT 0x{copyResult:X8}).");
+
+            if (framesToWrite > 0)
             {
-                dataPtr = (nint)NativeMemory.Alloc((nuint)length);
-                hdrPtr = (nint)NativeMemory.AllocZeroed((nuint)sizeof(LibWinMm.WAVEHDR));
-                capacity = length;
+                frameOffset += framesToWrite;
+                continue;
             }
 
-            fixed (byte* srcPtr = scaledSpan)
-            {
-                Buffer.MemoryCopy(srcPtr, (void*)dataPtr, length, length);
-            }
-
-            var hdr = (LibWinMm.WAVEHDR*)hdrPtr;
-            hdr->lpData = dataPtr;
-            hdr->dwBufferLength = (uint)length;
-            hdr->dwFlags = 0;
-
-            int prepRes = LibWinMm.waveOutPrepareHeader(target.Handle, hdrPtr, (uint)sizeof(LibWinMm.WAVEHDR));
-            if (prepRes != LibWinMm.MMSYSERR_NOERROR)
-            {
-                NativeMemory.Free((void*)hdrPtr);
-                NativeMemory.Free((void*)dataPtr);
-                return Result.Failure($"waveOutPrepareHeader failed with MMRESULT {prepRes}.");
-            }
-
-            int writeRes = LibWinMm.waveOutWrite(target.Handle, hdrPtr, (uint)sizeof(LibWinMm.WAVEHDR));
-            if (writeRes != LibWinMm.MMSYSERR_NOERROR)
-            {
-                LibWinMm.waveOutUnprepareHeader(target.Handle, hdrPtr, (uint)sizeof(LibWinMm.WAVEHDR));
-                NativeMemory.Free((void*)hdrPtr);
-                NativeMemory.Free((void*)dataPtr);
-                return Result.Failure($"waveOutWrite failed with MMRESULT {writeRes}.");
-            }
-
-            target.InFlight.Enqueue(new PreparedWaveBuffer(hdrPtr, dataPtr, capacity));
-            return Result.Success();
-        }
-    }
-
-    /* Unprepares completed WAVEHDR buffers and returns them to the target pool; returns remaining in-flight count */
-    private static unsafe int ReapCompletedBuffers(WaveOutTarget target)
-    {
-        if (target.IsDisposed)
-            return 0;
-
-        while (target.InFlight.TryPeek(out PreparedWaveBuffer front))
-        {
-            var hdr = (LibWinMm.WAVEHDR*)front.HeaderPtr;
-            if ((hdr->dwFlags & LibWinMm.WHDR_DONE) == 0)
-                break;
-
-            target.InFlight.Dequeue();
-            LibWinMm.waveOutUnprepareHeader(target.Handle, front.HeaderPtr, (uint)sizeof(LibWinMm.WAVEHDR));
-            target.FreePool.Push(front);
+            await WaitForBufferSpaceAsync(target, WaitTimeoutMs, token);
         }
 
-        return target.InFlight.Count;
+        return Result.Success();
     }
 
-    /* Waits until the target has fewer than maxInFlight queued buffers */
-    private async Task WaitForTargetCapacityAsync(
-        WaveOutTarget target,
-        int maxInFlight,
-        CancellationToken token)
+    /* Writes PCM frames directly into the WASAPI native buffer and applies SIMD volume scaling in-place */
+    private static unsafe int WriteFramesDirectly(WasapiTarget target, ReadOnlySpan<byte> pcmSlice, int frames)
     {
-        while (!token.IsCancellationRequested)
+        int hr = LibWasapi.RenderClientGetBuffer(target.RenderClient, (uint)frames, out nint dataPtr);
+        if (hr < 0 || dataPtr == 0)
+            return hr < 0 ? hr : unchecked((int)0x80004005);
+
+        var destSpan = new Span<byte>((void*)dataPtr, pcmSlice.Length);
+        pcmSlice.CopyTo(destSpan);
+
+        if (target.BitDepth == 16)
         {
-            int remaining;
+            float liveVolume = target.VolumeProvider();
+            SimdAudioProcessor.ScaleVolumeInPlace(destSpan, liveVolume);
+        }
+
+        return LibWasapi.RenderClientReleaseBuffer(target.RenderClient, (uint)frames, 0);
+    }
+
+    /* Waits until all queued frames in the WASAPI shared ring buffer finish playing */
+    private async Task DrainTargetAsync(WasapiTarget target, CancellationToken token)
+    {
+        int maxWaitIterations = Math.Max(20, (int)(target.BufferFrameCount * 1000 / Math.Max(target.SampleRate, 8000) / WaitTimeoutMs) + 40);
+
+        for (int iter = 0; iter < maxWaitIterations && !token.IsCancellationRequested; iter++)
+        {
+            uint padding;
+            bool paused;
             lock (_processLock)
             {
-                if (target.IsDisposed)
+                if (target.IsDisposed || target.AudioClient == 0)
                     return;
-                remaining = ReapCompletedBuffers(target);
+
+                paused = _isPaused;
+                if (!paused)
+                {
+                    int hr = LibWasapi.AudioClientGetCurrentPadding(target.AudioClient, out padding);
+                    if (hr < 0 || padding == 0)
+                        return;
+                }
+                else
+                {
+                    padding = 1;
+                }
             }
 
-            if (remaining < maxInFlight)
-                return;
+            if (paused)
+                iter = 0; /* Do not time out drain while user explicitly paused playback */
 
-            await WaitHandleAsync(target.BufferDoneEvent, 15, token);
+            await WaitForBufferSpaceAsync(target, WaitTimeoutMs, token);
         }
     }
 
-    /* Waits until all queued buffers on the target have completed hardware playback */
-    private async Task DrainTargetAsync(WaveOutTarget target, CancellationToken token)
+    /* Waits on the WASAPI buffer event when available, otherwise yields for a short interval */
+    private static Task WaitForBufferSpaceAsync(WasapiTarget target, int timeoutMs, CancellationToken token)
     {
-        while (!token.IsCancellationRequested)
-        {
-            int remaining;
-            lock (_processLock)
-            {
-                if (target.IsDisposed)
-                    return;
-                remaining = ReapCompletedBuffers(target);
-            }
+        if (target.BufferEvent != null)
+            return WaitHandleAsync(target.BufferEvent, timeoutMs, token);
 
-            if (remaining == 0)
-                return;
-
-            await WaitHandleAsync(target.BufferDoneEvent, 15, token);
-        }
+        return Task.Delay(timeoutMs, token);
     }
 
     /* Holds registration state for non-blocking WaitHandle awaiting without ThreadPool thread blocking */
@@ -631,84 +729,161 @@ public class WindowsAudioPlayer : IAudioPlayer
         return state.Tcs.Task;
     }
 
-    /* Resets the WinMM device, frees all remaining WAVEHDR buffers, and closes the handle (must be called under _processLock) */
-    private static unsafe void DisposeTarget(WaveOutTarget target)
+    /* Stops, resets, and releases all COM objects owned by a WasapiTarget (caller must hold _processLock) */
+    private static void DisposeTarget(WasapiTarget target)
     {
         if (target.IsDisposed)
             return;
 
         target.IsDisposed = true;
 
-        if (target.Handle != 0)
+        if (target.AudioClient != 0)
         {
-            LibWinMm.waveOutReset(target.Handle);
-
-            while (target.InFlight.TryDequeue(out PreparedWaveBuffer buf))
-            {
-                LibWinMm.waveOutUnprepareHeader(target.Handle, buf.HeaderPtr, (uint)sizeof(LibWinMm.WAVEHDR));
-                NativeMemory.Free((void*)buf.HeaderPtr);
-                NativeMemory.Free((void*)buf.DataPtr);
-            }
-
-            while (target.FreePool.TryPop(out PreparedWaveBuffer pooled))
-            {
-                NativeMemory.Free((void*)pooled.HeaderPtr);
-                NativeMemory.Free((void*)pooled.DataPtr);
-            }
-
-            LibWinMm.waveOutClose(target.Handle);
-            target.Handle = 0;
+            LibWasapi.AudioClientStop(target.AudioClient);
+            LibWasapi.AudioClientReset(target.AudioClient);
         }
+
+        if (target.RenderClient != 0)
+        {
+            LibWasapi.Release(target.RenderClient);
+            target.RenderClient = 0;
+        }
+
+        if (target.AudioClient != 0)
+        {
+            LibWasapi.Release(target.AudioClient);
+            target.AudioClient = 0;
+        }
+
+        if (target.BufferEvent != null)
+        {
+            try
+            {
+                target.BufferEvent.Set();
+                target.BufferEvent.Dispose();
+            }
+            catch
+            {
+                /* Ignore disposal race on wait handle */
+            }
+        }
+    }
+
+    /* Instantiates IMMDeviceEnumerator via ole32 CoCreateInstance */
+    private static nint CreateDeviceEnumerator()
+    {
+        Guid clsid = LibWasapi.CLSID_MMDeviceEnumerator;
+        Guid iid = LibWasapi.IID_IMMDeviceEnumerator;
+        int hr = LibWasapi.CoCreateInstance(ref clsid, 0, LibWasapi.CLSCTX_ALL, ref iid, out nint instance);
+        return hr >= 0 ? instance : 0;
+    }
+
+    /* Reads the stable Windows endpoint GUID string from IMMDevice::GetId */
+    private static string? ReadDeviceId(nint device)
+    {
+        if (LibWasapi.DeviceGetId(device, out nint idPtr) < 0 || idPtr == 0)
+            return null;
 
         try
         {
-            target.BufferDoneEvent.Set();
-            target.BufferDoneEvent.Dispose();
+            return Marshal.PtrToStringUni(idPtr);
         }
-        catch
+        finally
         {
-            /* Ignore disposal race on wait handle */
+            LibWasapi.CoTaskMemFree(idPtr);
         }
     }
 
-    /* Reads the null-terminated UTF-16 product name from WAVEOUTCAPSW */
-    private static unsafe string ExtractDeviceName(ref LibWinMm.WAVEOUTCAPSW caps, uint index)
+    /* Reads the full untruncated PKEY_Device_FriendlyName string from IMMDevice::OpenPropertyStore */
+    private static string ReadFriendlyName(nint device, int fallbackIndex)
     {
-        fixed (char* namePtr = caps.szPname)
-        {
-            var span = new ReadOnlySpan<char>(namePtr, LibWinMm.MAXPNAMELEN);
-            int nullIdx = span.IndexOf('\0');
-            if (nullIdx >= 0)
-                span = span[..nullIdx];
+        if (LibWasapi.DeviceOpenPropertyStore(device, LibWasapi.STGM_READ, out nint propStore) < 0 || propStore == 0)
+            return $"Audio Output Device {fallbackIndex}";
 
-            string trimmed = span.ToString().Trim();
-            return string.IsNullOrEmpty(trimmed) ? $"Audio Output Device {index}" : trimmed;
+        try
+        {
+            LibWasapi.PROPERTYKEY key = LibWasapi.PKEY_Device_FriendlyName;
+            if (LibWasapi.PropertyStoreGetValue(propStore, ref key, out LibWasapi.PROPVARIANT pv) < 0)
+                return $"Audio Output Device {fallbackIndex}";
+
+            try
+            {
+                if (pv.vt == LibWasapi.VT_LPWSTR && pv.pwszVal != 0)
+                {
+                    string? name = Marshal.PtrToStringUni(pv.pwszVal)?.Trim();
+                    if (!string.IsNullOrEmpty(name))
+                        return name;
+                }
+            }
+            finally
+            {
+                LibWasapi.PropVariantClear(ref pv);
+            }
         }
+        finally
+        {
+            LibWasapi.Release(propStore);
+        }
+
+        return $"Audio Output Device {fallbackIndex}";
     }
 
-    /* Tracks an unmanaged WAVEHDR and its pooled PCM payload buffer */
-    private readonly record struct PreparedWaveBuffer(nint HeaderPtr, nint DataPtr, int Capacity);
-
-    /* Represents an active WinMM waveOut device playback stream */
-    private sealed class WaveOutTarget(nint handle, AutoResetEvent bufferDoneEvent, Func<float> volumeProvider)
+    /* Ensures COM is initialized on the calling thread; returns true when caller must balance with CoUninitialize */
+    private static bool EnsureComInitialized()
     {
-        public nint Handle { get; set; } = handle;
-        public AutoResetEvent BufferDoneEvent { get; } = bufferDoneEvent;
+        int hr = LibWasapi.CoInitializeEx(0, LibWasapi.COINIT_MULTITHREADED);
+        return hr == 0 || hr == 1; /* S_OK or S_FALSE */
+    }
+
+    /* Represents an active WASAPI shared-mode render stream */
+    private sealed class WasapiTarget(
+        nint audioClient,
+        nint renderClient,
+        AutoResetEvent? bufferEvent,
+        uint bufferFrameCount,
+        int blockAlign,
+        int bitDepth,
+        int sampleRate,
+        Func<float> volumeProvider)
+    {
+        public nint AudioClient { get; set; } = audioClient;
+        public nint RenderClient { get; set; } = renderClient;
+        public AutoResetEvent? BufferEvent { get; } = bufferEvent;
+        public uint BufferFrameCount { get; } = bufferFrameCount;
+        public int BlockAlign { get; } = blockAlign;
+        public int BitDepth { get; } = bitDepth;
+        public int SampleRate { get; } = sampleRate;
         public Func<float> VolumeProvider { get; } = volumeProvider;
-        public Queue<PreparedWaveBuffer> InFlight { get; } = new();
-        public Stack<PreparedWaveBuffer> FreePool { get; } = new();
         public bool IsDisposed { get; set; }
     }
 
-    /* Native Win32 Multimedia (winmm.dll) declarations for AOT-safe PCM playback */
-    private static unsafe class LibWinMm
+    /* Zero-reflection COM vtable wrappers and structs for Windows WASAPI (ole32.dll) */
+    private static unsafe class LibWasapi
     {
-        public const int MMSYSERR_NOERROR = 0;
-        public const uint WAVE_MAPPER = unchecked((uint)-1);
+        public const uint COINIT_MULTITHREADED = 0x0;
+        public const uint CLSCTX_ALL = 0x17;
+        public const uint EDataFlowRender = 0;
+        public const uint ERoleConsole = 0;
+        public const uint DeviceStateActive = 0x00000001;
+        public const uint STGM_READ = 0;
+        public const ushort VT_LPWSTR = 31;
+
         public const ushort WAVE_FORMAT_PCM = 1;
-        public const uint CALLBACK_EVENT = 0x00050000;
-        public const uint WHDR_DONE = 0x00000001;
-        public const int MAXPNAMELEN = 32;
+        public const uint AUDCLNT_SHAREMODE_SHARED = 0;
+        public const uint AUDCLNT_STREAMFLAGS_EVENTCALLBACK = 0x00040000;
+        public const uint AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY = 0x08000000;
+        public const uint AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM = 0x80000000;
+
+        public static readonly Guid CLSID_MMDeviceEnumerator = new("BCDE0395-E52F-467C-8E3D-C4579291692E");
+        public static readonly Guid IID_IMMDeviceEnumerator = new("A95664D2-9614-4F35-A746-DE8DB63617E6");
+        public static readonly Guid IID_IAudioClient = new("1CB9AD4C-DBFA-4C32-B178-C2F568A703B2");
+        public static readonly Guid IID_IAudioRenderClient = new("F294ACFC-3146-4483-A7BF-ADDCA7C260E2");
+
+        public static readonly PROPERTYKEY PKEY_Device_FriendlyName = new()
+        {
+            fmtid = new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"),
+            pid = 14
+        };
 
         [StructLayout(LayoutKind.Sequential)]
         public struct WAVEFORMATEX
@@ -723,65 +898,173 @@ public class WindowsAudioPlayer : IAudioPlayer
         }
 
         [StructLayout(LayoutKind.Sequential)]
-        public struct WAVEHDR
+        public struct PROPERTYKEY
         {
-            public nint lpData;
-            public uint dwBufferLength;
-            public uint dwBytesRecorded;
-            public nint dwUser;
-            public uint dwFlags;
-            public uint dwLoops;
-            public nint lpNext;
-            public nint reserved;
+            public Guid fmtid;
+            public uint pid;
         }
 
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        public struct WAVEOUTCAPSW
+        [StructLayout(LayoutKind.Explicit, Size = 24)]
+        public struct PROPVARIANT
         {
-            public ushort wMid;
-            public ushort wPid;
-            public uint vDriverVersion;
-            public fixed char szPname[MAXPNAMELEN];
-            public uint dwFormats;
-            public ushort wChannels;
-            public ushort wReserved1;
-            public uint dwSupport;
+            [FieldOffset(0)] public ushort vt;
+            [FieldOffset(8)] public nint pwszVal;
         }
 
-        [DllImport("winmm.dll")]
-        public static extern uint waveOutGetNumDevs();
+        [DllImport("ole32.dll")]
+        public static extern int CoInitializeEx(nint pvReserved, uint dwCoInit);
 
-        [DllImport("winmm.dll", CharSet = CharSet.Unicode)]
-        public static extern int waveOutGetDevCapsW(nuint uDeviceID, out WAVEOUTCAPSW pwoc, uint cbwoc);
+        [DllImport("ole32.dll")]
+        public static extern void CoUninitialize();
 
-        [DllImport("winmm.dll")]
-        public static extern int waveOutOpen(
-            out nint phwo,
-            uint uDeviceID,
-            ref WAVEFORMATEX pwfx,
-            nint dwCallback,
-            nint dwInstance,
-            uint fdwOpen);
+        [DllImport("ole32.dll")]
+        public static extern int CoCreateInstance(ref Guid clsid, nint outer, uint context, ref Guid iid, out nint instance);
 
-        [DllImport("winmm.dll")]
-        public static extern int waveOutPrepareHeader(nint hwo, nint pwh, uint cbwh);
+        [DllImport("ole32.dll")]
+        public static extern void CoTaskMemFree(nint pv);
 
-        [DllImport("winmm.dll")]
-        public static extern int waveOutUnprepareHeader(nint hwo, nint pwh, uint cbwh);
+        [DllImport("ole32.dll")]
+        public static extern int PropVariantClear(ref PROPVARIANT pvar);
 
-        [DllImport("winmm.dll")]
-        public static extern int waveOutWrite(nint hwo, nint pwh, uint cbwh);
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static uint Release(nint comObj)
+        {
+            nint* vtbl = *(nint**)comObj;
+            return ((delegate* unmanaged[Stdcall]<nint, uint>)vtbl[2])(comObj);
+        }
 
-        [DllImport("winmm.dll")]
-        public static extern int waveOutPause(nint hwo);
+        /* IMMDeviceEnumerator */
+        public static int EnumAudioEndpoints(nint enumerator, uint dataFlow, uint stateMask, out nint devices)
+        {
+            nint* vtbl = *(nint**)enumerator;
+            return ((delegate* unmanaged[Stdcall]<nint, uint, uint, out nint, int>)vtbl[3])(enumerator, dataFlow, stateMask, out devices);
+        }
 
-        [DllImport("winmm.dll")]
-        public static extern int waveOutRestart(nint hwo);
+        public static int GetDefaultAudioEndpoint(nint enumerator, uint dataFlow, uint role, out nint endpoint)
+        {
+            nint* vtbl = *(nint**)enumerator;
+            return ((delegate* unmanaged[Stdcall]<nint, uint, uint, out nint, int>)vtbl[4])(enumerator, dataFlow, role, out endpoint);
+        }
 
-        [DllImport("winmm.dll")]
-        public static extern int waveOutReset(nint hwo);
+        public static int GetDevice(nint enumerator, char* id, out nint device)
+        {
+            nint* vtbl = *(nint**)enumerator;
+            return ((delegate* unmanaged[Stdcall]<nint, char*, out nint, int>)vtbl[5])(enumerator, id, out device);
+        }
 
-        [DllImport("winmm.dll")]
-        public static extern int waveOutClose(nint hwo);
+        /* IMMDeviceCollection */
+        public static int CollectionGetCount(nint collection, out uint count)
+        {
+            nint* vtbl = *(nint**)collection;
+            return ((delegate* unmanaged[Stdcall]<nint, out uint, int>)vtbl[3])(collection, out count);
+        }
+
+        public static int CollectionItem(nint collection, uint index, out nint device)
+        {
+            nint* vtbl = *(nint**)collection;
+            return ((delegate* unmanaged[Stdcall]<nint, uint, out nint, int>)vtbl[4])(collection, index, out device);
+        }
+
+        /* IMMDevice */
+        public static int DeviceActivate(nint device, ref Guid iid, uint clsCtx, nint activationParams, out nint iface)
+        {
+            nint* vtbl = *(nint**)device;
+            return ((delegate* unmanaged[Stdcall]<nint, ref Guid, uint, nint, out nint, int>)vtbl[3])(device, ref iid, clsCtx, activationParams, out iface);
+        }
+
+        public static int DeviceOpenPropertyStore(nint device, uint stgmAccess, out nint propStore)
+        {
+            nint* vtbl = *(nint**)device;
+            return ((delegate* unmanaged[Stdcall]<nint, uint, out nint, int>)vtbl[4])(device, stgmAccess, out propStore);
+        }
+
+        public static int DeviceGetId(nint device, out nint ppstrId)
+        {
+            nint* vtbl = *(nint**)device;
+            return ((delegate* unmanaged[Stdcall]<nint, out nint, int>)vtbl[5])(device, out ppstrId);
+        }
+
+        public static int DeviceGetState(nint device, out uint state)
+        {
+            nint* vtbl = *(nint**)device;
+            return ((delegate* unmanaged[Stdcall]<nint, out uint, int>)vtbl[6])(device, out state);
+        }
+
+        /* IPropertyStore */
+        public static int PropertyStoreGetValue(nint propStore, ref PROPERTYKEY key, out PROPVARIANT pv)
+        {
+            nint* vtbl = *(nint**)propStore;
+            return ((delegate* unmanaged[Stdcall]<nint, ref PROPERTYKEY, out PROPVARIANT, int>)vtbl[5])(propStore, ref key, out pv);
+        }
+
+        /* IAudioClient */
+        public static int AudioClientInitialize(
+            nint client,
+            uint shareMode,
+            uint streamFlags,
+            long bufferDuration,
+            long periodicity,
+            ref WAVEFORMATEX format,
+            nint sessionGuid)
+        {
+            nint* vtbl = *(nint**)client;
+            return ((delegate* unmanaged[Stdcall]<nint, uint, uint, long, long, ref WAVEFORMATEX, nint, int>)vtbl[3])(
+                client, shareMode, streamFlags, bufferDuration, periodicity, ref format, sessionGuid);
+        }
+
+        public static int AudioClientGetBufferSize(nint client, out uint frameCount)
+        {
+            nint* vtbl = *(nint**)client;
+            return ((delegate* unmanaged[Stdcall]<nint, out uint, int>)vtbl[4])(client, out frameCount);
+        }
+
+        public static int AudioClientGetCurrentPadding(nint client, out uint paddingFrames)
+        {
+            nint* vtbl = *(nint**)client;
+            return ((delegate* unmanaged[Stdcall]<nint, out uint, int>)vtbl[6])(client, out paddingFrames);
+        }
+
+        public static int AudioClientStart(nint client)
+        {
+            nint* vtbl = *(nint**)client;
+            return ((delegate* unmanaged[Stdcall]<nint, int>)vtbl[10])(client);
+        }
+
+        public static int AudioClientStop(nint client)
+        {
+            nint* vtbl = *(nint**)client;
+            return ((delegate* unmanaged[Stdcall]<nint, int>)vtbl[11])(client);
+        }
+
+        public static int AudioClientReset(nint client)
+        {
+            nint* vtbl = *(nint**)client;
+            return ((delegate* unmanaged[Stdcall]<nint, int>)vtbl[12])(client);
+        }
+
+        public static int AudioClientSetEventHandle(nint client, nint eventHandle)
+        {
+            nint* vtbl = *(nint**)client;
+            return ((delegate* unmanaged[Stdcall]<nint, nint, int>)vtbl[13])(client, eventHandle);
+        }
+
+        public static int AudioClientGetService(nint client, ref Guid riid, out nint service)
+        {
+            nint* vtbl = *(nint**)client;
+            return ((delegate* unmanaged[Stdcall]<nint, ref Guid, out nint, int>)vtbl[14])(client, ref riid, out service);
+        }
+
+        /* IAudioRenderClient */
+        public static int RenderClientGetBuffer(nint renderClient, uint numFramesRequested, out nint data)
+        {
+            nint* vtbl = *(nint**)renderClient;
+            return ((delegate* unmanaged[Stdcall]<nint, uint, out nint, int>)vtbl[3])(renderClient, numFramesRequested, out data);
+        }
+
+        public static int RenderClientReleaseBuffer(nint renderClient, uint numFramesWritten, uint flags)
+        {
+            nint* vtbl = *(nint**)renderClient;
+            return ((delegate* unmanaged[Stdcall]<nint, uint, uint, int>)vtbl[4])(renderClient, numFramesWritten, flags);
+        }
     }
 }

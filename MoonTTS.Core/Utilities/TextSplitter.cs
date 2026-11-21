@@ -24,6 +24,7 @@ public static partial class TextSplitter
     private const int MinChunkLength = 25;
     private const int TitleLongWindowCutoff = 40;
     private const int MaxSentenceLength = 100;
+    private const int MaxHardChunkLength = 180;
     private const int MinClauseLength = 30;
 
     private static readonly string[] ClauseDelimiters = [", ", "; ", " — ", " – ", "、", "，"];
@@ -205,7 +206,21 @@ public static partial class TextSplitter
             }
 
             if (bestSplitEnd < 0)
-                break;
+            {
+                /* Fallback for punctuation-free run-on sentences so neural model token limits are never exceeded */
+                if (sentence.Length - start > MaxHardChunkLength)
+                {
+                    int searchEnd = Math.Min(start + MaxSentenceLength, sentence.Length - 1);
+                    int spaceIdx = sentence.LastIndexOf(' ', searchEnd, searchEnd - start);
+                    bestSplitEnd = spaceIdx > start + MinClauseLength
+                        ? spaceIdx
+                        : Math.Min(start + MaxHardChunkLength, sentence.Length);
+                }
+                else
+                {
+                    break;
+                }
+            }
 
             string slice = sentence[start..bestSplitEnd].Trim();
             if (!string.IsNullOrEmpty(slice))

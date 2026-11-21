@@ -1,4 +1,3 @@
-using System.Text.Json;
 using MoonTTS.Core.Utilities;
 using MoonTTS.Domain.Common;
 using MoonTTS.Domain.Entities;
@@ -8,7 +7,7 @@ namespace MoonTTS.Core.Services;
 
 /* File Structure:
         - GetProfiles() : IReadOnlyList<HotkeyProfile>
-        - GetActiveProfiles() : HotkeyProfile
+        - GetActiveProfile() : HotkeyProfile
         - CreateProfile(string name) : Result
         - RenameProfile(string oldName, string newName) : Result
         - SetActiveProfile(string name) : Result
@@ -48,7 +47,7 @@ public class ProfileManager
     public IReadOnlyList<HotkeyProfile> GetProfiles() => Store.Profiles.AsReadOnly();
 
     /* Retrieves the currently active hotkey profile, creating a default one if necessary */
-    public HotkeyProfile GetActiveProfiles()
+    public HotkeyProfile GetActiveProfile()
     {
         var profile = Store.Profiles.FirstOrDefault(p =>
             string.Equals(p.Name, Store.ActiveProfileName, StringComparison.OrdinalIgnoreCase));
@@ -173,9 +172,23 @@ public class ProfileManager
             try
             {
                 if (Directory.Exists(oldFolderPath))
-                    Directory.Move(oldFolderPath, newFolderPath);
+                {
+                    if (string.Equals(oldFolderPath, newFolderPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        /* Case-only renames on Windows/macOS require a two-step move via a temp directory */
+                        string tempFolderPath = Path.Combine(_hotkeysDir, $".rename_{Guid.NewGuid():N}");
+                        Directory.Move(oldFolderPath, tempFolderPath);
+                        Directory.Move(tempFolderPath, newFolderPath);
+                    }
+                    else
+                    {
+                        Directory.Move(oldFolderPath, newFolderPath);
+                    }
+                }
                 else
+                {
                     Directory.CreateDirectory(newFolderPath);
+                }
             }
             catch (Exception ex)
             {

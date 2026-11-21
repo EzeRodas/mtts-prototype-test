@@ -13,29 +13,32 @@ namespace MoonTTS.Infrastructure.Tts;
         - GetModelMetadata(ModelId modelId) : ModelMetadata?
         - FindModel(string query) : ModelMetadata?
         - GetEngine(string engineId) : EngineDescriptor?
+        - Refresh() : void
+        - GetCachedEngines() : IReadOnlyList<EngineDescriptor>
         - ScanEngines(string enginesDirectory) : IReadOnlyList<EngineDescriptor>
         - TryLoadEngine(string engineDirectory) : EngineDescriptor?
-        - ResolveExecutable(string engineDirectory, string executable) : string
+        - TryResolveExecutable(string engineDirectory, string executable) : string?
 */
 
 /* Discovers installed engines by scanning "<data>/Moon-TTS/engines/<Name>/engine.json".
    Engines are never referenced by the host code; adding one only requires dropping its folder in place */
 public class EngineCatalog : IModelRegistry
 {
-    private readonly Lazy<IReadOnlyList<EngineDescriptor>> _engines;
+    private readonly string _enginesDirectory;
+    private readonly Lock _cacheLock = new();
+    private IReadOnlyList<EngineDescriptor>? _cachedEngines;
 
     /* Scans the given folder, or the platform engines folder when none is provided */
     public EngineCatalog(string? enginesDirectory = null)
     {
-        string directory = enginesDirectory ?? PathResolver.GetEnginesDirectory();
-        _engines = new Lazy<IReadOnlyList<EngineDescriptor>>(() => ScanEngines(directory));
+        _enginesDirectory = enginesDirectory ?? PathResolver.GetEnginesDirectory();
     }
 
     /* Returns every model of every installed engine */
-    public IEnumerable<ModelMetadata> GetAvailableModels() => _engines.Value.SelectMany(e => e.Models);
+    public IEnumerable<ModelMetadata> GetAvailableModels() => GetCachedEngines().SelectMany(e => e.Models);
 
     /* Returns every installed engine and its descriptors */
-    public IReadOnlyList<EngineDescriptor> GetEngines() => _engines.Value;
+    public IReadOnlyList<EngineDescriptor> GetEngines() => GetCachedEngines();
 
     /* Looks up a model by its exact id */
     public ModelMetadata? GetModelMetadata(ModelId modelId) =>
@@ -63,7 +66,27 @@ public class EngineCatalog : IModelRegistry
 
     /* Looks up an installed engine by id */
     public EngineDescriptor? GetEngine(string engineId) =>
-        _engines.Value.FirstOrDefault(e => string.Equals(e.Id, engineId, StringComparison.Ordinal));
+        GetCachedEngines().FirstOrDefault(e => string.Equals(e.Id, engineId, StringComparison.Ordinal));
+
+    /* Re-scans the engines directory on disk to pick up newly added or removed engine folders */
+    public void Refresh()
+    {
+        var scanned = ScanEngines(_enginesDirectory);
+        lock (_cacheLock)
+        {
+            _cachedEngines = scanned;
+        }
+    }
+
+    /* Lazily scans and caches installed engine descriptors */
+    private IReadOnlyList<EngineDescriptor> GetCachedEngines()
+    {
+        lock (_cacheLock)
+        {
+            _cachedEngines ??= ScanEngines(_enginesDirectory);
+            return _cachedEngines;
+        }
+    }
 
     /* Loads every valid engine folder. Invalid manifests are reported and skipped so one broken engine
        never hides the others */
@@ -81,8 +104,7 @@ public class EngineCatalog : IModelRegistry
 
             if (engines.Any(e => e.Id == engine.Id))
             {
-                Console.Error.WriteLine(
-                    $"[EngineCatalog] Skipping '{engineDirectory}': engine id '{engine.Id}' is already installed.");
+                AppLogger.Warning("EngineCatalog", $"Skipping '{engineDirectory}': engine id '{engine.Id}' is already installed.");
                 continue;
             }
             engines.Add(engine);
@@ -107,7 +129,14 @@ public class EngineCatalog : IModelRegistry
                 || manifest.Id.Contains(ModelId.Separator)
                 || string.IsNullOrWhiteSpace(manifest.Executable))
             {
-                Console.Error.WriteLine($"[EngineCatalog] '{manifestPath}' needs a valid 'id' and 'executable'.");
+                AppLogger.Warning("EngineCatalog", $"'{manifestPath}' needs a valid 'id' and 'executable'.");
+                return null;
+            }
+
+            string? executablePath = TryResolveExecutable(engineDirectory, manifest.Executable);
+            if (executablePath == null)
+            {
+                AppLogger.Warning("EngineCatalog", $"Skipping '{manifestPath}': executable '{manifest.Executable}' escapes the engine folder.");
                 return null;
             }
 
@@ -120,29 +149,43 @@ public class EngineCatalog : IModelRegistry
                     m.Size,
                     m.RamUsage,
                     m.CpuUsage,
-                    m.Languages))
+                    m.Languages,
+                    FileChecksums: m.FileChecksums != null
+                        ? new Dictionary<string, string>(m.FileChecksums, StringComparer.OrdinalIgnoreCase)
+                        : null))
                 .ToList();
 
             return new EngineDescriptor(
                 manifest.Id,
                 string.IsNullOrWhiteSpace(manifest.DisplayName) ? manifest.Id : manifest.DisplayName,
                 engineDirectory,
-                ResolveExecutable(engineDirectory, manifest.Executable),
+                executablePath,
                 models);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
-            Console.Error.WriteLine($"[EngineCatalog] Failed to read '{manifestPath}': {ex.Message}");
+            AppLogger.Error("EngineCatalog", $"Failed to read '{manifestPath}'", ex);
             return null;
         }
     }
 
-    /* Resolves the worker path relative to the engine folder, accepting extension-less names on Windows */
-    private static string ResolveExecutable(string engineDirectory, string executable)
+    /* Resolves the worker path relative to the engine folder while preventing path traversal outside it */
+    private static string? TryResolveExecutable(string engineDirectory, string executable)
     {
+        string normalizedRoot = Path.GetFullPath(engineDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
         string path = Path.GetFullPath(Path.Combine(engineDirectory, executable));
+
+        StringComparison cmp = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+
+        if (!path.StartsWith(normalizedRoot, cmp))
+            return null;
+
         if (OperatingSystem.IsWindows() && !File.Exists(path) && File.Exists(path + ".exe"))
             return path + ".exe";
+
         return path;
     }
 }

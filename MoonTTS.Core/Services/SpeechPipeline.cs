@@ -9,24 +9,27 @@ namespace MoonTTS.Core.Services;
 
 /* File Structure:
         - SpeechPipeline(
-            ITtsEngineProvider engineProvider, 
-            DictionaryManager dictionaryManager, 
-            HistoryManager historyManager, 
-            SettingsManager settingsManager, 
+            ITtsEngineProvider engineProvider,
+            DictionaryManager dictionaryManager,
+            HistoryManager historyManager,
+            SettingsManager settingsManager,
             IAudioPlayer audioPlayer)
         - SpeakAsync(string text, CancellationToken ct) : Task<Result<SpeechResult>>
         - SpeakAsync(
-            string rawText, 
-            SpeechOptions options, 
+            string rawText,
+            SpeechOptions options,
             CancellationToken cancellationToken) : Task<Result<SpeechResult>>
         - PlayWavFileAsync(string wavPath, CancellationToken cancellationToken) : Task<Result>
-        - ReadAndCaptureStream() : IAsyncEnumerable<ReadOnlyMemory<byte>>
+        - PlayWavFileWithInfoAsync(string wavPath, CancellationToken cancellationToken) : Task<Result<(TimeSpan Duration, int PcmBytes)>>
+        - PlayWavCoreAsync(string wavPath, CancellationToken sessionToken) : Task<Result<(TimeSpan Duration, int PcmBytes)>>
         - Pause() : void
         - Resume() : void
         - Stop() : void
 */
 
-/* Unified pipeline for all speech actions. Interactive speech matching a history entry replays it instead of synthesizing */
+/* Unified pipeline for all speech and audio playback actions (HUD, hotkeys, and history).
+   Interactive speech matching a history entry replays it instead of re-synthesizing.
+   Non-playback pre-rendering (such as hotkey phrase generation) intentionally interrupts active playback */
 public class SpeechPipeline : ISpeechPipeline
 {
     /* Returned by SpeakAsync when no model is selected in settings */
@@ -42,7 +45,9 @@ public class SpeechPipeline : ISpeechPipeline
     private readonly IAudioPlayer _audioPlayer;
 
     private readonly Lock _sessionLock = new();
+    private readonly SemaphoreSlim _queueLock = new(1, 1);
     private CancellationTokenSource? _activeCts;
+    private CancellationTokenSource _queueCts = new();
 
     public bool IsSpeaking { get; private set; }
     public bool IsPaused { get; private set; }
@@ -71,8 +76,8 @@ public class SpeechPipeline : ISpeechPipeline
 
     /* Orchestrates dictionary substitution, sentence chunking, parallel synthesis, audio streaming, and history capture */
     public async Task<Result<SpeechResult>> SpeakAsync(
-        string rawText, 
-        SpeechOptions options, 
+        string rawText,
+        SpeechOptions options,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(rawText))
@@ -86,13 +91,37 @@ public class SpeechPipeline : ISpeechPipeline
         if (!engine.IsAvailable)
             return Result<SpeechResult>.Failure("TTS model is not available or downloaded.");
 
+        bool useQueue = options.EnablePlayback && _settingsManager.CurrentAppConfig.QueueSpeech;
+        bool queueAcquired = false;
+        CancellationToken queueStopToken;
+        lock (_sessionLock)
+        {
+            queueStopToken = _queueCts.Token;
+        }
+
+        if (useQueue)
+        {
+            using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, queueStopToken);
+            try
+            {
+                await _queueLock.WaitAsync(waitCts.Token);
+                queueAcquired = true;
+            }
+            catch (OperationCanceledException)
+            {
+                return Result<SpeechResult>.Failure(CancelledMessage);
+            }
+        }
+
         CancellationTokenSource sessionCts;
         lock (_sessionLock)
         {
-            _activeCts?.Cancel();
-            _activeCts?.Dispose();
-            _activeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            sessionCts = _activeCts;
+            /* Cancel-only on previous session; each session owns and disposes its own CTS in finally */
+            if (!useQueue)
+                _activeCts?.Cancel();
+
+            sessionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _queueCts.Token);
+            _activeCts = sessionCts;
             IsSpeaking = true;
             IsPaused = false;
         }
@@ -121,28 +150,35 @@ public class SpeechPipeline : ISpeechPipeline
                     effectiveSpeed);
                 if (cached != null)
                 {
-                    var replay = await _historyManager.PlayEntryWithInfoAsync(cached.Id, sessionToken);
-                    if (sessionToken.IsCancellationRequested)
+                    var wavPathRes = _historyManager.GetEntryWavPath(cached.Id);
+                    if (wavPathRes.IsSuccess)
                     {
-                        _audioPlayer.Stop();
-                        return Result<SpeechResult>.Failure(CancelledMessage);
-                    }
-                    if (replay.IsFailure)
-                        return Result<SpeechResult>.Failure(replay.ErrorMessage ?? "Playback failed.");
+                        var replay = await PlayWavCoreAsync(wavPathRes.Value, sessionToken);
+                        if (sessionToken.IsCancellationRequested)
+                        {
+                            _audioPlayer.Stop();
+                            return Result<SpeechResult>.Failure(CancelledMessage);
+                        }
+                        if (replay.IsFailure)
+                            return Result<SpeechResult>.Failure(replay.ErrorMessage ?? "Playback failed.");
 
-                    return Result<SpeechResult>.Success(new SpeechResult
-                    {
-                        AudioDuration = replay.Value.Duration,
-                        TimeToFirstSound = sw.Elapsed,
-                        TotalPcmBytes = replay.Value.PcmBytes
-                    });
+                        return Result<SpeechResult>.Success(new SpeechResult
+                        {
+                            AudioDuration = replay.Value.Duration,
+                            TimeToFirstSound = sw.Elapsed,
+                            TotalPcmBytes = replay.Value.PcmBytes
+                        });
+                    }
                 }
             }
 
             var sentences = TextSplitter.SplitIntoSentences(processedText);
-
             var config = _settingsManager.CurrentAppConfig;
             var format = engine.OutputFormat;
+
+            bool needHistory = options.RecordHistory && config.SaveHistory;
+            bool needExport = !string.IsNullOrWhiteSpace(options.ExportPath);
+            bool needWavCapture = needHistory || needExport;
 
             if (options.EnablePlayback)
             {
@@ -184,14 +220,22 @@ public class SpeechPipeline : ISpeechPipeline
                 }
             }, sessionToken);
 
-            using var pcmAccumulator = new MemoryStream();
-            pcmAccumulator.Write(new byte[WavWriter.HeaderSize]);
+            using var pcmAccumulator = needWavCapture ? new MemoryStream() : null;
+            if (pcmAccumulator != null)
+            {
+                Span<byte> zeroHeader = stackalloc byte[WavWriter.HeaderSize];
+                zeroHeader.Clear();
+                pcmAccumulator.Write(zeroHeader);
+            }
+
+            int totalPcmBytes = 0;
 
             async IAsyncEnumerable<ReadOnlyMemory<byte>> ReadAndCaptureStream()
             {
                 await foreach (var chunk in channel.Reader.ReadAllAsync(sessionToken))
                 {
-                    pcmAccumulator.Write(chunk.Span);
+                    totalPcmBytes += chunk.Length;
+                    pcmAccumulator?.Write(chunk.Span);
                     yield return chunk;
                 }
             }
@@ -200,42 +244,67 @@ public class SpeechPipeline : ISpeechPipeline
             {
                 var playResult = await _audioPlayer.StreamPcmAsync(ReadAndCaptureStream(), format, sessionToken);
                 if (playResult.IsFailure)
+                {
+                    /* Always cancel and drain producerTask so it never stalls on the bounded channel */
+                    sessionCts.Cancel();
+                    try { await producerTask; } catch { /* Expected cancellation */ }
                     return Result<SpeechResult>.Failure(playResult.ErrorMessage ?? "Playback failed.");
+                }
             }
             else
             {
                 await foreach (var chunk in channel.Reader.ReadAllAsync(sessionToken))
                 {
-                    pcmAccumulator.Write(chunk.Span);
+                    totalPcmBytes += chunk.Length;
+                    pcmAccumulator?.Write(chunk.Span);
                 }
             }
 
             await producerTask;
 
-            int totalPcmBytes = Math.Max(0, (int)pcmAccumulator.Length - WavWriter.HeaderSize);
-            byte[] headerBytes = new byte[WavWriter.HeaderSize];
-            WavWriter.WriteWavHeader(headerBytes, totalPcmBytes, format);
-            pcmAccumulator.Position = 0;
-            pcmAccumulator.Write(headerBytes);
-            byte[] masterWav = pcmAccumulator.ToArray();
-
-            if (options.RecordHistory && config.SaveHistory && totalPcmBytes > 0)
+            if (pcmAccumulator != null && totalPcmBytes > 0)
             {
-                await _historyManager.AddEntry(
-                    rawText,
-                    masterWav,
-                    config.ActiveModel,
-                    engine.ActiveVoice,
-                    processedText,
-                    effectiveSpeed);
-            }
+                Span<byte> headerBytes = stackalloc byte[WavWriter.HeaderSize];
+                WavWriter.WriteWavHeader(headerBytes, totalPcmBytes, format);
+                pcmAccumulator.Position = 0;
+                pcmAccumulator.Write(headerBytes);
 
-            if (!string.IsNullOrWhiteSpace(options.ExportPath) && totalPcmBytes > 0)
-            {
-                string? exportDir = Path.GetDirectoryName(options.ExportPath);
-                if (!string.IsNullOrEmpty(exportDir))
-                    Directory.CreateDirectory(exportDir);
-                await File.WriteAllBytesAsync(options.ExportPath, masterWav, sessionToken);
+                ReadOnlyMemory<byte> wavMemory = pcmAccumulator.GetBuffer().AsMemory(0, (int)pcmAccumulator.Length);
+
+                if (needHistory)
+                {
+                    await _historyManager.AddEntry(
+                        rawText,
+                        wavMemory,
+                        config.ActiveModel,
+                        engine.ActiveVoice,
+                        processedText,
+                        effectiveSpeed);
+                }
+
+                if (needExport)
+                {
+                    string exportPath = options.ExportPath!;
+                    string? exportDir = Path.GetDirectoryName(exportPath);
+                    if (!string.IsNullOrEmpty(exportDir))
+                        Directory.CreateDirectory(exportDir);
+
+                    string tempExportPath = $"{exportPath}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
+                    try
+                    {
+                        await using (var fs = new FileStream(tempExportPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536, FileOptions.Asynchronous))
+                        {
+                            await fs.WriteAsync(wavMemory, sessionToken);
+                            await fs.FlushAsync(sessionToken);
+                        }
+                        File.Move(tempExportPath, exportPath, overwrite: true);
+                    }
+                    catch
+                    {
+                        try { if (File.Exists(tempExportPath)) File.Delete(tempExportPath); } catch { }
+                        throw;
+                    }
+                }
             }
 
             return Result<SpeechResult>.Success(new SpeechResult
@@ -253,6 +322,7 @@ public class SpeechPipeline : ISpeechPipeline
         catch (Exception ex)
         {
             _audioPlayer.Stop();
+            AppLogger.Error("SpeechPipeline", "Speech synthesis failed", ex);
             return Result<SpeechResult>.Failure($"Speech error: {ex.Message}", ex);
         }
         finally
@@ -260,7 +330,7 @@ public class SpeechPipeline : ISpeechPipeline
             bool changed = false;
             lock (_sessionLock)
             {
-                if (_activeCts == sessionCts)
+                if (ReferenceEquals(_activeCts, sessionCts))
                 {
                     _activeCts = null;
                     IsSpeaking = false;
@@ -269,6 +339,8 @@ public class SpeechPipeline : ISpeechPipeline
                 }
             }
             sessionCts.Dispose();
+            if (queueAcquired)
+                _queueLock.Release();
             if (changed)
                 PlaybackStateChanged?.Invoke();
         }
@@ -277,20 +349,30 @@ public class SpeechPipeline : ISpeechPipeline
     /* Plays a pre-rendered WAV file through the active session lock so HUD controls work uniformly */
     public async Task<Result> PlayWavFileAsync(string wavPath, CancellationToken cancellationToken = default)
     {
+        var result = await PlayWavFileWithInfoAsync(wavPath, cancellationToken);
+        return result.IsSuccess
+            ? Result.Success()
+            : Result.Failure(result.ErrorMessage ?? "Failed to play audio file.", result.Exception);
+    }
+
+    /* Plays a pre-rendered WAV file through the active session lock and reports its duration and PCM byte count */
+    public async Task<Result<(TimeSpan Duration, int PcmBytes)>> PlayWavFileWithInfoAsync(
+        string wavPath,
+        CancellationToken cancellationToken = default)
+    {
         if (!File.Exists(wavPath))
-            return Result.Failure($"Audio file '{wavPath}' was not found.");
+            return Result<(TimeSpan, int)>.Failure($"Audio file '{wavPath}' was not found.");
 
         var config = _settingsManager.CurrentAppConfig;
         if (!config.EnablePrimaryPlayback && !config.EnableMonitorPlayback)
-            return Result.Success();
+            return Result<(TimeSpan, int)>.Success((TimeSpan.Zero, 0));
 
         CancellationTokenSource sessionCts;
         lock (_sessionLock)
         {
             _activeCts?.Cancel();
-            _activeCts?.Dispose();
-            _activeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            sessionCts = _activeCts;
+            sessionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _queueCts.Token);
+            _activeCts = sessionCts;
             IsSpeaking = true;
             IsPaused = false;
         }
@@ -299,40 +381,25 @@ public class SpeechPipeline : ISpeechPipeline
         var sessionToken = sessionCts.Token;
         try
         {
-            byte[] wavBytes = await File.ReadAllBytesAsync(wavPath, sessionToken);
-            AudioFormat format = FormatReader.GetFormatFromWavHeader(wavBytes);
-            ReadOnlyMemory<byte> pcm = wavBytes.Length > WavWriter.HeaderSize
-                ? wavBytes.AsMemory(WavWriter.HeaderSize)
-                : wavBytes;
-
-            string? primaryId = config.EnablePrimaryPlayback ? config.PrimaryAudioDeviceId : null;
-            string? monitorId = config.EnableMonitorPlayback ? config.MonitorAudioDeviceId : null;
-
-            _audioPlayer.SetOutputDevices(primaryId, monitorId);
-            _audioPlayer.SetVolume(config.PrimaryVolume, config.MonitorVolume);
-
-            var playResult = await _audioPlayer.PlayPcmAsync(pcm, format, sessionToken);
-            if (sessionToken.IsCancellationRequested)
-                return Result.Failure(CancelledMessage);
-
-            return playResult;
+            return await PlayWavCoreAsync(wavPath, sessionToken);
         }
         catch (OperationCanceledException)
         {
             _audioPlayer.Stop();
-            return Result.Failure(CancelledMessage);
+            return Result<(TimeSpan, int)>.Failure(CancelledMessage);
         }
         catch (Exception ex)
         {
             _audioPlayer.Stop();
-            return Result.Failure($"Failed to play audio file: {ex.Message}", ex);
+            AppLogger.Error("SpeechPipeline", $"Failed to play audio file '{wavPath}'", ex);
+            return Result<(TimeSpan, int)>.Failure($"Failed to play audio file: {ex.Message}", ex);
         }
         finally
         {
             bool changed = false;
             lock (_sessionLock)
             {
-                if (_activeCts == sessionCts)
+                if (ReferenceEquals(_activeCts, sessionCts))
                 {
                     _activeCts = null;
                     IsSpeaking = false;
@@ -346,35 +413,84 @@ public class SpeechPipeline : ISpeechPipeline
         }
     }
 
-    /* Pauses the current audio playback process */
+    /* Reads a WAV file, parses its dynamic format header, configures active outputs, and plays PCM */
+    private async Task<Result<(TimeSpan Duration, int PcmBytes)>> PlayWavCoreAsync(
+        string wavPath,
+        CancellationToken sessionToken)
+    {
+        var config = _settingsManager.CurrentAppConfig;
+        if (!config.EnablePrimaryPlayback && !config.EnableMonitorPlayback)
+            return Result<(TimeSpan, int)>.Success((TimeSpan.Zero, 0));
+
+        byte[] wavBytes = await File.ReadAllBytesAsync(wavPath, sessionToken);
+        AudioFormat format = FormatReader.GetFormatFromWavHeader(wavBytes);
+        ReadOnlyMemory<byte> pcm = wavBytes.Length > WavWriter.HeaderSize
+            ? wavBytes.AsMemory(WavWriter.HeaderSize)
+            : wavBytes;
+
+        string? primaryId = config.EnablePrimaryPlayback ? config.PrimaryAudioDeviceId : null;
+        string? monitorId = config.EnableMonitorPlayback ? config.MonitorAudioDeviceId : null;
+
+        _audioPlayer.SetOutputDevices(primaryId, monitorId);
+        _audioPlayer.SetVolume(config.PrimaryVolume, config.MonitorVolume);
+
+        var playResult = await _audioPlayer.PlayPcmAsync(pcm, format, sessionToken);
+        if (sessionToken.IsCancellationRequested)
+            return Result<(TimeSpan, int)>.Failure(CancelledMessage);
+        if (playResult.IsFailure)
+            return Result<(TimeSpan, int)>.Failure(playResult.ErrorMessage ?? "Playback failed.", playResult.Exception);
+
+        return Result<(TimeSpan, int)>.Success((format.GetDuration(pcm.Length), pcm.Length));
+    }
+
+    /* Pauses the current audio playback process when speech is active */
     public void Pause()
     {
+        bool changed;
+        lock (_sessionLock)
+        {
+            if (!IsSpeaking || IsPaused)
+                return;
+            IsPaused = true;
+            changed = true;
+        }
         _audioPlayer.Pause();
-        IsPaused = true;
-        PlaybackStateChanged?.Invoke();
+        if (changed)
+            PlaybackStateChanged?.Invoke();
     }
 
     /* Resumes the paused audio playback process */
     public void Resume()
     {
+        bool changed;
+        lock (_sessionLock)
+        {
+            if (!IsSpeaking || !IsPaused)
+                return;
+            IsPaused = false;
+            changed = true;
+        }
         _audioPlayer.Resume();
-        IsPaused = false;
-        PlaybackStateChanged?.Invoke();
+        if (changed)
+            PlaybackStateChanged?.Invoke();
     }
 
-    /* Immediately cancels ongoing synthesis and terminates audio playback */
+    /* Immediately cancels ongoing synthesis, clears queued speech, and terminates audio playback */
     public void Stop()
     {
         bool changed;
+        CancellationTokenSource oldQueueCts;
         lock (_sessionLock)
         {
             changed = IsSpeaking || IsPaused;
             _activeCts?.Cancel();
-            _activeCts?.Dispose();
-            _activeCts = null;
+            oldQueueCts = _queueCts;
+            _queueCts = new CancellationTokenSource();
             IsSpeaking = false;
             IsPaused = false;
         }
+        oldQueueCts.Cancel();
+        oldQueueCts.Dispose();
         _audioPlayer.Stop();
         if (changed)
             PlaybackStateChanged?.Invoke();

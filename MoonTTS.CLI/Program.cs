@@ -30,9 +30,8 @@ class Program
         ConfigureServices(services);
         using var serviceProvider = services.BuildServiceProvider();
 
-        /* Ensures base configuration directory is initialized */
-        var configRepo = serviceProvider.GetRequiredService<IConfigurationRepository>();
-        configRepo.LoadAll();
+        /* Configuration is loaded automatically by JsonConfigurationRepository on construction */
+        _ = serviceProvider.GetRequiredService<IConfigurationRepository>();
 
         var rootCommand = BuildRootCommand(serviceProvider);
         var parseResult = rootCommand.Parse(args);
@@ -50,7 +49,14 @@ class Program
         services.AddSingleton<DownloadManager>();
         services.AddSingleton<HistoryManager>();
         services.AddSingleton<DictionaryManager>();
-        services.AddSingleton<HttpClient>();
+        services.AddSingleton(_ => new HttpClient(new SocketsHttpHandler
+        {
+            ConnectTimeout = TimeSpan.FromSeconds(15),
+            PooledConnectionLifetime = TimeSpan.FromMinutes(2)
+        })
+        {
+            Timeout = Timeout.InfiniteTimeSpan
+        });
         services.AddSingleton<DaemonClient>();
         services.AddSingleton<DaemonServer>();
         services.AddSingleton<ITtsEngineFactory, TtsEngineFactory>();

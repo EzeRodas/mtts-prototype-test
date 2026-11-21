@@ -1,12 +1,15 @@
 using System;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MoonTTS.Avalonia.Services;
+using MoonTTS.Avalonia.ViewModels.Settings;
 using MoonTTS.Core.Services;
+using MoonTTS.Core.Utilities;
 using MoonTTS.Domain.Entities;
 using MoonTTS.Domain.Interfaces;
 using MoonTTS.Domain.ValueObjects;
@@ -15,44 +18,39 @@ namespace MoonTTS.Avalonia.ViewModels;
 
 /* File Structure:
         - AdvancedTab (Enum)
-        - ModelStatusItem (Class)
-        - SettingsViewModel(SettingsManager, IAudioPlayer, IWindowService, DownloadManager, DictionaryManager?, HotkeyManager?, HistoryManager?, ITtsEngineProvider?, ProfileManager?)
+        - SettingsViewModel(SettingsManager, IAudioPlayer, IWindowService, DownloadManager, ISpeechPipeline?, DictionaryManager?, HotkeyManager?, HistoryManager?, ITtsEngineProvider?, ProfileManager?)
+        - Dictionary : DictionarySettingsViewModel
+        - History : HistorySettingsViewModel
+        - Hotkeys : HotkeysSettingsViewModel
+        - EngineManagement : EngineManagementViewModel
         - IsLinux : bool
+        - IsRecordingToggleHotkey : bool
+        - IsRecordingPhraseHotkey : bool
+        - ApplyRecordedHotkey(string) : void
+        - CancelRecording() : void
         - LoadAudioDevices() : void
         - LoadTtsEngines() : void
         - UpdateAvailableModelDownloadState(ModelId, bool) : void
+        - EnsureModelUnloadedBeforeDeleteAsync(ModelId) : Task
         - RefreshVoicesAsync() : Task
         - SelectVoiceFromConfig() : void
         - LoadSettings() : void
-        - LoadProfiles() : void
-        - RefreshHotkeyEntries() : void
-        - LoadModelStatuses() : void
-        - ShowModelStatusAsync(string message) : void
-        - SwitchModelAsync(ModelMetadata model) : Task
-        - RevertModelSelectionAsync(bool navigateToEngineManagement) : Task
+        - LoadLanguages() : void
+        - OnLanguageChanged() : void
+        - ShowModelStatus(string) : void
+        - ClearModelStatusAfterDelayAsync(CancellationTokenSource, CancellationToken) : Task
+        - SwitchModelAsync(ModelMetadata) : Task
+        - RevertModelSelectionAsync(bool) : Task
         - AutoSave() : void
         - FlushPendingSave() : void
         - SwitchToAdvanced() : void
         - SwitchToQuick() : void
-        - SelectTab(AdvancedTab) : void
-        - AddDictionaryEntry() : void
-        - DeleteDictionaryEntry(Guid) : void
-        - StartAddProfile() : void
-        - StartRenameProfile() : void
-        - ConfirmAddProfile() : void
-        - CancelAddProfile() : void
-        - DeleteProfile() : void
-        - AddHotkeyPhraseAsync() : Task
-        - PlayHotkeyPhraseAsync(Guid) : Task
-        - DeleteHotkeyPhrase(Guid) : void
-        - PlayHistoryItemAsync(Guid) : Task
-        - ClearHistory() : void
-        - DeleteHistoryItem(Guid) : void
         - NavigateToEngineManagement() : void
-        - DownloadModelAsync(ModelStatusItem) : Task
-        - DeleteModel(ModelStatusItem) : void
+        - SelectTab(AdvancedTab) : void
+        - OpenLogsFolder() : void
         - Close() : void
         - ExitApp() : void
+        - Dispose() : void
 */
 
 public enum AdvancedTab
@@ -66,96 +64,27 @@ public enum AdvancedTab
     History,
 }
 
-public partial class ModelStatusItem : ObservableObject
+public partial class SettingsViewModel : ViewModelBase, IDisposable
 {
-    [ObservableProperty]
-    private ModelId _model;
-
-    [ObservableProperty]
-    private string _name = string.Empty;
-
-    [ObservableProperty]
-    private bool _isSeparator;
-
-    [ObservableProperty]
-    private string _separatorTitle = string.Empty;
-
-    [ObservableProperty]
-    private string? _sizeTag;
-
-    [ObservableProperty]
-    private string? _ramUsageTag;
-
-    [ObservableProperty]
-    private string? _cpuUsageTag;
-
-    [ObservableProperty]
-    private bool _isCpuLow;
-
-    [ObservableProperty]
-    private bool _isCpuMedium;
-
-    [ObservableProperty]
-    private bool _isCpuHigh;
-
-    [ObservableProperty]
-    private string? _languageTag;
-
-    [ObservableProperty]
-    private string? _languagesPopupText;
-
-    [ObservableProperty]
-    private bool _hasMultipleLanguages;
-
-    public bool HasTags =>
-        !string.IsNullOrEmpty(SizeTag)
-        || !string.IsNullOrEmpty(RamUsageTag)
-        || !string.IsNullOrEmpty(CpuUsageTag)
-        || !string.IsNullOrEmpty(LanguageTag);
-
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(CanDownload))]
-    [NotifyPropertyChangedFor(nameof(CanDelete))]
-    private bool _isDownloaded;
-
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(CanDownload))]
-    [NotifyPropertyChangedFor(nameof(CanDelete))]
-    private bool _hasDownloadableFiles;
-
-    [ObservableProperty]
-    private bool _isDownloading;
-
-    [ObservableProperty]
-    private double _progress;
-
-    /* True when the manifest declares downloadable files that are not yet downloaded */
-    public bool CanDownload => !IsSeparator && HasDownloadableFiles && !IsDownloaded;
-
-    /* True when the manifest declares downloadable files that are currently downloaded */
-    public bool CanDelete => !IsSeparator && HasDownloadableFiles && IsDownloaded;
-}
-
-public partial class SettingsViewModel : ViewModelBase
-{
-    public const string ModelNotInstalledMessage =
-        "Model not installed. For download please head to the advanced settings menu";
-
     private readonly SettingsManager? _settingsManager;
     private readonly IAudioPlayer? _audioPlayer;
     private readonly IWindowService? _windowService;
     private readonly DownloadManager? _downloadManager;
-    private readonly DictionaryManager? _dictManager;
-    private readonly HotkeyManager? _hotkeyManager;
-    private readonly HistoryManager? _historyManager;
     private readonly ITtsEngineProvider? _engineProvider;
-    private readonly ProfileManager? _profileManager;
 
     private bool _isLoading;
+    private bool _disposed;
     private readonly Lock _saveLock = new();
     private CancellationTokenSource? _saveDebounceCts;
+    private CancellationTokenSource? _statusCts;
     private bool _hasPendingSave;
     private ModelId? _pendingEngineModel;
+
+    /* Composed per-tab child ViewModels */
+    public DictionarySettingsViewModel Dictionary { get; }
+    public HistorySettingsViewModel History { get; }
+    public HotkeysSettingsViewModel Hotkeys { get; }
+    public EngineManagementViewModel EngineManagement { get; }
 
     /* View Mode & Active Tab */
     [ObservableProperty]
@@ -171,7 +100,7 @@ public partial class SettingsViewModel : ViewModelBase
     [ObservableProperty]
     private VoiceInfo? _selectedVoice;
 
-    /* Feedback shown under the model selectors (e.g. the selected model is not installed) */
+    /* Feedback shown under the model selectors or on Engine Management / Hotkeys tabs */
     [ObservableProperty]
     private string? _modelStatusMessage;
 
@@ -210,6 +139,9 @@ public partial class SettingsViewModel : ViewModelBase
     private bool _hideOnSynth;
 
     [ObservableProperty]
+    private bool _queueSpeech;
+
+    [ObservableProperty]
     private bool _rememberPosition;
 
     [ObservableProperty]
@@ -218,96 +150,65 @@ public partial class SettingsViewModel : ViewModelBase
     [ObservableProperty]
     private string _customModelsDirectory = string.Empty;
 
-    /* Hotkey Settings */
+    /* Selected UI display language */
     [ObservableProperty]
-    private HotkeyProfile? _selectedProfile;
-
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsEditingProfile))]
-    private bool _isAddingProfile;
-
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsEditingProfile))]
-    private bool _isRenamingProfile;
-
-    [ObservableProperty]
-    private string _newProfileName = string.Empty;
-
-    /* True when either creating a new profile or renaming the selected profile via the editable row */
-    public bool IsEditingProfile => IsAddingProfile || IsRenamingProfile;
-
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(ToggleHotkeyDisplayText))]
-    private string _toggleAppHotkey = "Ctrl+Alt+M";
-
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(PhraseHotkeyDisplayText))]
-    private string _newHotkeyKey = string.Empty;
-
-    [ObservableProperty]
-    private string _newHotkeyPhrase = string.Empty;
-
-    /* Hotkey Recording State */
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(ToggleHotkeyDisplayText))]
-    [NotifyPropertyChangedFor(nameof(ToggleRecordButtonText))]
-    private bool _isRecordingToggleHotkey;
-
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(PhraseHotkeyDisplayText))]
-    private bool _isRecordingPhraseHotkey;
-
-    /* Dictionary Composer */
-    [ObservableProperty]
-    private string _newDictOriginal = string.Empty;
-
-    [ObservableProperty]
-    private string _newDictSpelling = string.Empty;
-
-    [ObservableProperty]
-    private bool _newDictCaseSensitive;
+    private LanguageOption? _selectedLanguage;
 
     /* Collections */
+    public ObservableCollection<LanguageOption> AvailableLanguages { get; } = new();
     public ObservableCollection<ModelMetadata> AvailableModels { get; } = new();
     public ObservableCollection<VoiceInfo> AvailableVoices { get; } = new();
     public ObservableCollection<AudioDeviceInfo> AvailableOutputDevices { get; } = new();
-    public ObservableCollection<DictionaryEntry> DictionaryEntries { get; } = new();
-    public ObservableCollection<HotkeyProfile> AvailableProfiles { get; } = new();
-    public ObservableCollection<HotkeyEntry> HotkeyEntries { get; } = new();
-    public ObservableCollection<HistoryEntry> HistoryEntries { get; } = new();
-    public ObservableCollection<ModelStatusItem> ModelStatuses { get; } = new();
 
-    /* Constructor for previewer */
+    /* Forwarding properties/methods used by SettingsWindow keyboard-capture code-behind */
+    public bool IsRecordingToggleHotkey => Hotkeys.IsRecordingToggleHotkey;
+    public bool IsRecordingPhraseHotkey => Hotkeys.IsRecordingPhraseHotkey;
+    public void ApplyRecordedHotkey(string shortcut) => Hotkeys.ApplyRecordedHotkey(shortcut);
+    public void CancelRecording() => Hotkeys.CancelRecording();
+
+    /* True only on Linux, where PulseAudio / PipeWire null-sink virtual microphones can be created */
+    public bool IsLinux => OperatingSystem.IsLinux();
+
+    /* Design-time constructor for Avalonia previewer */
     protected SettingsViewModel()
-        : this(null!, null!, null!, null!, null!, null!, null!, null!, null!) { }
+        : this(null!, null!, null!, null!, null, null, null, null, null, null) { }
 
-    /* Main Constructor */
+    /* Main DI constructor */
     public SettingsViewModel(
         SettingsManager settingsManager,
         IAudioPlayer audioPlayer,
         IWindowService windowService,
         DownloadManager downloadManager,
+        ISpeechPipeline? speechPipeline = null,
         DictionaryManager? dictManager = null,
         HotkeyManager? hotkeyManager = null,
         HistoryManager? historyManager = null,
         ITtsEngineProvider? engineProvider = null,
-        ProfileManager? profileManager = null
-    )
+        ProfileManager? profileManager = null)
     {
         _settingsManager = settingsManager;
         _audioPlayer = audioPlayer;
         _windowService = windowService;
         _downloadManager = downloadManager;
-        _dictManager = dictManager;
-        _hotkeyManager = hotkeyManager;
-        _historyManager = historyManager;
         _engineProvider = engineProvider;
-        _profileManager = profileManager;
+
+        Dictionary = new DictionarySettingsViewModel(dictManager, ShowModelStatus);
+        History = new HistorySettingsViewModel(historyManager, speechPipeline, ShowModelStatus);
+        Hotkeys = new HotkeysSettingsViewModel(settingsManager, hotkeyManager, profileManager, AutoSave, ShowModelStatus);
+        EngineManagement = new EngineManagementViewModel(
+            downloadManager,
+            UpdateAvailableModelDownloadState,
+            EnsureModelUnloadedBeforeDeleteAsync,
+            RefreshVoicesAsync,
+            OnEnginesRescanned,
+            ShowModelStatus);
 
         if (_settingsManager != null && _audioPlayer != null)
         {
+            LocalizationService.Instance.LanguageChanged += OnLanguageChanged;
             LoadTtsEngines();
-            LoadModelStatuses();
+            EngineManagement.Load();
+            LoadLanguages();
             LoadSettings();
 
             /* Voices come from the engine worker, so they are filled in once the engine finishes loading */
@@ -315,20 +216,57 @@ public partial class SettingsViewModel : ViewModelBase
         }
     }
 
-    public string ToggleHotkeyDisplayText =>
-        IsRecordingToggleHotkey
-            ? "Press keys... (Esc to cancel)"
-            : (string.IsNullOrWhiteSpace(ToggleAppHotkey) ? "None" : ToggleAppHotkey);
+    /* Populates the selectable UI languages from built-in and custom locale packs */
+    private void LoadLanguages()
+    {
+        AvailableLanguages.Clear();
+        foreach (var lang in LocalizationService.Instance.GetAvailableLanguages())
+            AvailableLanguages.Add(lang);
+    }
 
-    public string PhraseHotkeyDisplayText =>
-        IsRecordingPhraseHotkey
-            ? "Press keys..."
-            : (string.IsNullOrWhiteSpace(NewHotkeyKey) ? "Record shortcut..." : NewHotkeyKey);
+    /* Applies and persists a newly selected UI display language immediately */
+    partial void OnSelectedLanguageChanged(LanguageOption? value)
+    {
+        if (_isLoading || value == null)
+            return;
 
-    public string ToggleRecordButtonText => IsRecordingToggleHotkey ? "Cancel" : "Change";
+        LocalizationService.Instance.SetLanguage(value.Code);
+        AutoSave();
+    }
 
-    /* True only on Linux, where PulseAudio / PipeWire null-sink virtual microphones can be created */
-    public bool IsLinux => OperatingSystem.IsLinux();
+    /* Refreshes localized dynamic text items and formatted tags after a live language switch */
+    private void OnLanguageChanged()
+    {
+        Hotkeys.RefreshLocalizedProperties();
+
+        bool prevLoading = _isLoading;
+        _isLoading = true;
+        try
+        {
+            if (AvailableModels.Count > 0 && AvailableModels[0].IsUnselected)
+            {
+                bool wasUnselected = SelectedModel is { IsUnselected: true };
+                var localizedUnselected = ModelMetadata.Unselected with { DisplayName = L.Strings.UnselectedModel };
+                AvailableModels[0] = localizedUnselected;
+                if (wasUnselected)
+                    SelectedModel = localizedUnselected;
+            }
+
+            string? primaryId = SelectedPrimaryDevice?.DeviceId;
+            string? monitorId = SelectedMonitorDevice?.DeviceId;
+            LoadAudioDevices();
+            SelectedPrimaryDevice = AvailableOutputDevices.FirstOrDefault(d => d.DeviceId == primaryId)
+                                    ?? AvailableOutputDevices.FirstOrDefault();
+            SelectedMonitorDevice = AvailableOutputDevices.FirstOrDefault(d => d.DeviceId == monitorId)
+                                    ?? AvailableOutputDevices.FirstOrDefault(d => d.DeviceId == "-1");
+
+            EngineManagement.Load();
+        }
+        finally
+        {
+            _isLoading = prevLoading;
+        }
+    }
 
     /* Populates audio outputs from platform sink enumerator */
     private void LoadAudioDevices()
@@ -338,12 +276,17 @@ public partial class SettingsViewModel : ViewModelBase
         if (_audioPlayer != null)
         {
             var result = _audioPlayer.GetAvailableDevices();
-            if (result.IsSuccess && result.Value != null)
+            if (result.IsSuccess)
             {
                 foreach (var dev in result.Value)
                 {
                     if (AvailableOutputDevices.All(d => d.DeviceId != dev.DeviceId))
-                        AvailableOutputDevices.Add(dev);
+                    {
+                        var localizedDev = dev.DeviceId == "-1"
+                            ? new AudioDeviceInfo { DeviceId = dev.DeviceId, DeviceName = L.Strings.DefaultSystemDevice }
+                            : dev;
+                        AvailableOutputDevices.Add(localizedDev);
+                    }
                 }
             }
         }
@@ -353,16 +296,16 @@ public partial class SettingsViewModel : ViewModelBase
             AvailableOutputDevices.Insert(0, new AudioDeviceInfo
             {
                 DeviceId = "-1",
-                DeviceName = "Default System Device",
+                DeviceName = L.Strings.DefaultSystemDevice,
             });
         }
     }
 
-    /* Populates every model offered by the installed engines grouped by engine with separators, preceded by the "Unselected" entry */
+    /* Populates every model offered by the installed engines grouped by engine with separators */
     private void LoadTtsEngines()
     {
         AvailableModels.Clear();
-        AvailableModels.Add(ModelMetadata.Unselected);
+        AvailableModels.Add(ModelMetadata.Unselected with { DisplayName = L.Strings.UnselectedModel });
         if (_downloadManager == null)
             return;
 
@@ -382,6 +325,25 @@ public partial class SettingsViewModel : ViewModelBase
         }
     }
 
+    /* Refreshes model dropdowns after EngineCatalog rescans disk */
+    private void OnEnginesRescanned()
+    {
+        bool prevLoading = _isLoading;
+        _isLoading = true;
+        try
+        {
+            ModelId active = _settingsManager?.CurrentAppConfig.ActiveModel ?? ModelId.Unselected;
+            LoadTtsEngines();
+            SelectedModel = AvailableModels.FirstOrDefault(m => m.Id == active)
+                ?? AvailableModels.FirstOrDefault(m => m.IsUnselected)
+                ?? ModelMetadata.Unselected;
+        }
+        finally
+        {
+            _isLoading = prevLoading;
+        }
+    }
+
     /* Synchronizes the download status of an entry in AvailableModels so model dropdowns update live */
     private void UpdateAvailableModelDownloadState(ModelId modelId, bool isDownloaded)
     {
@@ -393,6 +355,36 @@ public partial class SettingsViewModel : ViewModelBase
                 AvailableModels[i] = model with { IsDownloaded = isDownloaded };
                 break;
             }
+        }
+
+        if (!isDownloaded && SelectedModel != null && SelectedModel.Id == modelId)
+        {
+            SelectedModel = AvailableModels.FirstOrDefault(m => m.IsUnselected) ?? ModelMetadata.Unselected;
+        }
+    }
+
+    /* Unloads the model worker before deleting its files on disk to avoid OS file-lock failures on Windows */
+    private async Task EnsureModelUnloadedBeforeDeleteAsync(ModelId modelId)
+    {
+        bool isCurrentSelected = SelectedModel != null && SelectedModel.Id == modelId;
+        bool isLoaded = _engineProvider != null && _engineProvider.CurrentModel == modelId;
+
+        if (!isCurrentSelected && !isLoaded)
+            return;
+
+        if (_engineProvider != null)
+            await _engineProvider.SwitchModelAsync(ModelId.Unselected);
+
+        _isLoading = true;
+        try
+        {
+            SelectedModel = AvailableModels.FirstOrDefault(m => m.IsUnselected) ?? ModelMetadata.Unselected;
+            AvailableVoices.Clear();
+            SelectedVoice = null;
+        }
+        finally
+        {
+            _isLoading = false;
         }
     }
 
@@ -431,73 +423,6 @@ public partial class SettingsViewModel : ViewModelBase
         SelectedVoice = AvailableVoices.FirstOrDefault(v => v.Id == configuredVoice) ?? AvailableVoices.FirstOrDefault();
     }
 
-    /* Populates model download statuses with engine separators and resource tags */
-    private void LoadModelStatuses()
-    {
-        ModelStatuses.Clear();
-        if (_downloadManager == null)
-            return;
-
-        foreach (var engine in _downloadManager.GetEngines())
-        {
-            if (engine.Models.Count == 0)
-                continue;
-
-            string engineTitle = !string.IsNullOrWhiteSpace(engine.DisplayName) ? engine.DisplayName : engine.Id;
-            ModelStatuses.Add(new ModelStatusItem
-            {
-                IsSeparator = true,
-                SeparatorTitle = engineTitle
-            });
-
-            foreach (var model in engine.Models)
-            {
-                string? cpu = model.CpuUsage?.Trim().ToLowerInvariant();
-                var sortedLanguages = model.Languages?
-                    .Where(l => !string.IsNullOrWhiteSpace(l))
-                    .Select(l => l.Trim())
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .OrderBy(l => l, StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
-                string? languageTag = null;
-                string? languagesPopupText = null;
-                bool hasMultipleLanguages = false;
-
-                if (sortedLanguages is { Count: 1 })
-                {
-                    languageTag = $"Language: {sortedLanguages[0]}";
-                }
-                else if (sortedLanguages is { Count: > 1 })
-                {
-                    languageTag = $"Languages: {sortedLanguages.Count}";
-                    languagesPopupText = string.Join(", ", sortedLanguages);
-                    hasMultipleLanguages = true;
-                }
-
-                ModelStatuses.Add(
-                    new ModelStatusItem
-                    {
-                        Model = model.Id,
-                        Name = model.DisplayName,
-                        IsDownloaded = _downloadManager.IsModelDownloaded(model.Id),
-                        HasDownloadableFiles = model.DownloadFiles.Count > 0,
-                        Progress = 0,
-                        SizeTag = model.Size.HasValue ? $"Size: {model.Size.Value} MB" : null,
-                        RamUsageTag = model.RamUsage.HasValue ? $"Ram usage: {model.RamUsage.Value} MB" : null,
-                        CpuUsageTag = !string.IsNullOrEmpty(model.CpuUsage) ? $"CPU usage: {model.CpuUsage}" : null,
-                        IsCpuLow = cpu == "low",
-                        IsCpuMedium = cpu == "medium",
-                        IsCpuHigh = cpu == "high",
-                        LanguageTag = languageTag,
-                        LanguagesPopupText = languagesPopupText,
-                        HasMultipleLanguages = hasMultipleLanguages
-                    }
-                );
-            }
-        }
-    }
-
     /* Loads all configuration values and refreshes audio output devices for hot-plugged hardware */
     public void LoadSettings()
     {
@@ -508,9 +433,15 @@ public partial class SettingsViewModel : ViewModelBase
         try
         {
             LoadAudioDevices();
+            LoadLanguages();
 
             var appConfig = _settingsManager.CurrentAppConfig;
-            SelectedModel = AvailableModels.FirstOrDefault(m => m.Id == appConfig.ActiveModel) ?? ModelMetadata.Unselected;
+            SelectedLanguage = AvailableLanguages.FirstOrDefault(l =>
+                    string.Equals(l.Code, appConfig.Language, StringComparison.OrdinalIgnoreCase))
+                ?? AvailableLanguages.FirstOrDefault();
+            SelectedModel = AvailableModels.FirstOrDefault(m => m.Id == appConfig.ActiveModel)
+                ?? AvailableModels.FirstOrDefault(m => m.IsUnselected)
+                ?? ModelMetadata.Unselected;
             var engineConfig = !SelectedModel.IsUnselected
                 ? _settingsManager.GetEngineConfig(SelectedModel.Id)
                 : new EngineConfig();
@@ -518,16 +449,14 @@ public partial class SettingsViewModel : ViewModelBase
 
             EnablePrimaryPlayback = appConfig.EnablePrimaryPlayback;
             SelectedPrimaryDevice =
-                AvailableOutputDevices.FirstOrDefault(d =>
-                    d.DeviceId == appConfig.PrimaryAudioDeviceId
-                ) ?? AvailableOutputDevices.FirstOrDefault();
+                AvailableOutputDevices.FirstOrDefault(d => d.DeviceId == appConfig.PrimaryAudioDeviceId)
+                ?? AvailableOutputDevices.FirstOrDefault();
             PrimaryVolume = appConfig.PrimaryVolume;
 
             EnableMonitorPlayback = appConfig.EnableMonitorPlayback;
             SelectedMonitorDevice =
-                AvailableOutputDevices.FirstOrDefault(d =>
-                    d.DeviceId == appConfig.MonitorAudioDeviceId
-                ) ?? AvailableOutputDevices.FirstOrDefault(d => d.DeviceId == "-1");
+                AvailableOutputDevices.FirstOrDefault(d => d.DeviceId == appConfig.MonitorAudioDeviceId)
+                ?? AvailableOutputDevices.FirstOrDefault(d => d.DeviceId == "-1");
             MonitorVolume = appConfig.MonitorVolume;
 
             SpeechSpeed = engineConfig.Speed > 0 ? engineConfig.Speed : 1.0f;
@@ -535,32 +464,14 @@ public partial class SettingsViewModel : ViewModelBase
             OpenOnStartup = appConfig.OpenOnStartup;
             AlwaysOnTop = appConfig.AlwaysOnTop;
             HideOnSynth = appConfig.HideOnSynth;
+            QueueSpeech = appConfig.QueueSpeech;
             RememberPosition = appConfig.RememberPosition;
             CreateMicOnStartup = appConfig.CreateMicOnStartup;
-            ToggleAppHotkey = appConfig.ToggleAppHotkey;
             CustomModelsDirectory = appConfig.CustomModelsDirectory ?? string.Empty;
 
-            CancelRecording();
-            IsAddingProfile = false;
-            IsRenamingProfile = false;
-            NewProfileName = string.Empty;
-
-            if (_dictManager != null)
-            {
-                DictionaryEntries.Clear();
-                foreach (var entry in _dictManager.GetEntries())
-                    DictionaryEntries.Add(entry);
-            }
-
-            LoadProfiles();
-            RefreshHotkeyEntries();
-
-            if (_historyManager != null)
-            {
-                HistoryEntries.Clear();
-                foreach (var h in _historyManager.GetHistory())
-                    HistoryEntries.Add(h);
-            }
+            Dictionary.Load();
+            Hotkeys.Load();
+            History.Load();
         }
         finally
         {
@@ -568,42 +479,12 @@ public partial class SettingsViewModel : ViewModelBase
         }
     }
 
-    /* Populates available hotkey profiles and selects the currently active profile */
-    private void LoadProfiles()
-    {
-        if (_profileManager == null)
-            return;
-
-        AvailableProfiles.Clear();
-        foreach (var profile in _profileManager.GetProfiles())
-            AvailableProfiles.Add(profile);
-
-        var active = _profileManager.GetActiveProfiles();
-        SelectedProfile = AvailableProfiles.FirstOrDefault(p =>
-            string.Equals(p.Name, active.Name, StringComparison.OrdinalIgnoreCase))
-            ?? AvailableProfiles.FirstOrDefault();
-    }
-
-    /* Reloads the hotkey entries collection for the currently active profile */
-    private void RefreshHotkeyEntries()
-    {
-        if (_hotkeyManager == null)
-            return;
-
-        HotkeyEntries.Clear();
-        foreach (var hk in _hotkeyManager.GetHotkeys())
-            HotkeyEntries.Add(hk);
-    }
-
-    /* Auto-save triggers */
+    /* Handles model selection, redirecting uninstalled models to Engine Management */
     partial void OnSelectedModelChanged(ModelMetadata? value)
     {
         if (_isLoading || value == null || value.IsSeparator)
             return;
 
-        /* Every installed engine's models are listed, but only downloaded ones can be activated.
-           Clicking an uninstalled one reverts the selection and opens Engine Management so it can be downloaded.
-           Unselected has no files and is always allowed */
         if (!value.IsUnselected && _downloadManager != null && !_downloadManager.IsModelDownloaded(value.Id))
         {
             _ = RevertModelSelectionAsync(navigateToEngineManagement: true);
@@ -621,20 +502,36 @@ public partial class SettingsViewModel : ViewModelBase
         }
     }
 
-    /* Shows a transient message in the model status popup and clears it after a few seconds,
-       unless a newer message replaced it in the meantime */
-    private async void ShowModelStatusAsync(string message)
+    /* Shows a transient status message for 5 seconds, cancelling any earlier timer cleanly */
+    private void ShowModelStatus(string message)
+    {
+        _statusCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _statusCts = cts;
+        var token = cts.Token;
+
+        ModelStatusMessage = message;
+        _ = ClearModelStatusAfterDelayAsync(cts, token);
+    }
+
+    /* Clears ModelStatusMessage after 5 seconds unless superseded by a newer status */
+    private async Task ClearModelStatusAfterDelayAsync(CancellationTokenSource cts, CancellationToken token)
     {
         try
         {
-            ModelStatusMessage = message;
-            await Task.Delay(5000);
-            if (ModelStatusMessage == message)
+            await Task.Delay(5000, token);
+            if (!token.IsCancellationRequested)
                 ModelStatusMessage = null;
         }
-        catch
+        catch (OperationCanceledException)
         {
-            /* Ignored */
+            /* Superseded by newer status message */
+        }
+        finally
+        {
+            if (ReferenceEquals(_statusCts, cts))
+                _statusCts = null;
+            cts.Dispose();
         }
     }
 
@@ -665,15 +562,13 @@ public partial class SettingsViewModel : ViewModelBase
         }
         else
         {
-            /* Model switch failed (e.g. the engine worker could not start) - revert dropdown without saving */
-            await Console.Error.WriteLineAsync($"Model switch failed: {switchResult.ErrorMessage}");
-            ShowModelStatusAsync(switchResult.ErrorMessage ?? "Model switch failed.");
+            AppLogger.Error("SettingsViewModel", $"Model switch failed: {switchResult.ErrorMessage}", switchResult.Exception);
+            ShowModelStatus(switchResult.ErrorMessage ?? L.Strings.ModelSwitchFailed);
             await RevertModelSelectionAsync();
         }
     }
 
-    /* Restores the dropdown to the saved active model without saving. Yields first so the ComboBox finishes
-       applying the user's selection before it is replaced */
+    /* Restores the dropdown to the saved active model without saving */
     private async Task RevertModelSelectionAsync(bool navigateToEngineManagement = false)
     {
         await Task.Yield();
@@ -683,7 +578,9 @@ public partial class SettingsViewModel : ViewModelBase
         try
         {
             SelectedModel = null;
-            SelectedModel = AvailableModels.FirstOrDefault(m => m.Id == activeModel) ?? ModelMetadata.Unselected;
+            SelectedModel = AvailableModels.FirstOrDefault(m => m.Id == activeModel)
+                ?? AvailableModels.FirstOrDefault(m => m.IsUnselected)
+                ?? ModelMetadata.Unselected;
         }
         finally
         {
@@ -695,69 +592,14 @@ public partial class SettingsViewModel : ViewModelBase
     }
 
     partial void OnSelectedVoiceChanged(VoiceInfo? value) => AutoSave();
-
     partial void OnSpeechSpeedChanged(float value) => AutoSave();
-
-    partial void OnToggleAppHotkeyChanged(string value)
-    {
-        if (_isLoading || _settingsManager == null)
-            return;
-
-        if (!ShortcutCombo.TryParse(value, out _))
-        {
-            _isLoading = true;
-            try
-            {
-                ToggleAppHotkey = _settingsManager.CurrentAppConfig.ToggleAppHotkey;
-            }
-            finally
-            {
-                _isLoading = false;
-            }
-            return;
-        }
-
-        if (_hotkeyManager != null)
-        {
-            var result = _hotkeyManager.AssignToggleHotkey(value);
-            if (result.IsFailure)
-                return;
-        }
-
-        AutoSave();
-    }
-
-    /* Switches the active hotkey profile when the user selects a different profile from the ComboBox */
-    partial void OnSelectedProfileChanged(HotkeyProfile? value)
-    {
-        if (_isLoading || _profileManager == null || value == null)
-            return;
-
-        var res = _profileManager.SetActiveProfile(value.Name);
-        if (res.IsSuccess)
-        {
-            RefreshHotkeyEntries();
-        }
-        else
-        {
-            ShowModelStatusAsync(res.ErrorMessage ?? "Failed to switch profile.");
-        }
-    }
-
     partial void OnEnablePrimaryPlaybackChanged(bool value) => AutoSave();
-
     partial void OnSelectedPrimaryDeviceChanged(AudioDeviceInfo? value) => AutoSave();
-
     partial void OnPrimaryVolumeChanged(int value) => AutoSave();
-
     partial void OnEnableMonitorPlaybackChanged(bool value) => AutoSave();
-
     partial void OnSelectedMonitorDeviceChanged(AudioDeviceInfo? value) => AutoSave();
-
     partial void OnMonitorVolumeChanged(int value) => AutoSave();
-
     partial void OnSelectedMonitorIndexChanged(int value) => AutoSave();
-
     partial void OnOpenOnStartupChanged(bool value) => AutoSave();
 
     /* Applies the new on-top state to the open windows right away, then persists it */
@@ -771,11 +613,9 @@ public partial class SettingsViewModel : ViewModelBase
     }
 
     partial void OnHideOnSynthChanged(bool value) => AutoSave();
-
+    partial void OnQueueSpeechChanged(bool value) => AutoSave();
     partial void OnRememberPositionChanged(bool value) => AutoSave();
-
     partial void OnCreateMicOnStartupChanged(bool value) => AutoSave();
-
     partial void OnCustomModelsDirectoryChanged(string value) => AutoSave();
 
     /* Applies changes immediately in memory and audio output, while debouncing disk persistence by 250ms */
@@ -785,6 +625,7 @@ public partial class SettingsViewModel : ViewModelBase
             return;
 
         ModelId? dirtyEngineModel = null;
+        CancellationTokenSource cts;
         CancellationToken token;
 
         lock (_saveLock)
@@ -803,8 +644,10 @@ public partial class SettingsViewModel : ViewModelBase
             appConfig.OpenOnStartup = OpenOnStartup;
             appConfig.AlwaysOnTop = AlwaysOnTop;
             appConfig.HideOnSynth = HideOnSynth;
+            appConfig.QueueSpeech = QueueSpeech;
             appConfig.RememberPosition = RememberPosition;
             appConfig.CreateMicOnStartup = CreateMicOnStartup;
+            appConfig.Language = SelectedLanguage?.Code ?? LocalizationService.Instance.CurrentLanguage;
             appConfig.CustomModelsDirectory = string.IsNullOrWhiteSpace(CustomModelsDirectory)
                 ? null
                 : CustomModelsDirectory.Trim();
@@ -817,20 +660,21 @@ public partial class SettingsViewModel : ViewModelBase
                 dirtyEngineModel = SelectedModel.Id;
             }
 
-            _audioPlayer.SetOutputDevices(
-                appConfig.PrimaryAudioDeviceId,
-                appConfig.MonitorAudioDeviceId
-            );
+            /* Respect EnablePrimaryPlayback / EnableMonitorPlayback toggles when syncing live outputs */
+            string? effectivePrimary = appConfig.EnablePrimaryPlayback ? appConfig.PrimaryAudioDeviceId : null;
+            string? effectiveMonitor = appConfig.EnableMonitorPlayback ? appConfig.MonitorAudioDeviceId : null;
+            _audioPlayer.SetOutputDevices(effectivePrimary, effectiveMonitor);
             _audioPlayer.SetVolume(appConfig.PrimaryVolume, appConfig.MonitorVolume);
 
             _hasPendingSave = true;
             if (dirtyEngineModel.HasValue)
                 _pendingEngineModel = dirtyEngineModel;
 
+            /* Cancel-only on superseded debounce; each task owns and disposes its own CTS in finally */
             _saveDebounceCts?.Cancel();
-            _saveDebounceCts?.Dispose();
-            _saveDebounceCts = new CancellationTokenSource();
-            token = _saveDebounceCts.Token;
+            cts = new CancellationTokenSource();
+            _saveDebounceCts = cts;
+            token = cts.Token;
         }
 
         _ = Task.Run(async () =>
@@ -845,7 +689,16 @@ public partial class SettingsViewModel : ViewModelBase
             {
                 /* Superseded by newer slider tick or explicit flush */
             }
-        }, token);
+            finally
+            {
+                lock (_saveLock)
+                {
+                    if (ReferenceEquals(_saveDebounceCts, cts))
+                        _saveDebounceCts = null;
+                }
+                cts.Dispose();
+            }
+        });
     }
 
     /* Immediately persists any debounced application and engine configuration changes to disk */
@@ -864,6 +717,7 @@ public partial class SettingsViewModel : ViewModelBase
             modelToSave = _pendingEngineModel;
             _pendingEngineModel = null;
             _saveDebounceCts?.Cancel();
+            _saveDebounceCts = null;
         }
 
         _settingsManager.SaveAppConfig(_settingsManager.CurrentAppConfig);
@@ -871,63 +725,6 @@ public partial class SettingsViewModel : ViewModelBase
         {
             _settingsManager.SaveEngineConfig(modelToSave.Value, _settingsManager.GetEngineConfig(modelToSave.Value));
         }
-    }
-
-    /* Handles applying the recorded hotkey combination */
-    public void ApplyRecordedHotkey(string shortcut)
-    {
-        if (IsRecordingToggleHotkey)
-        {
-            ToggleAppHotkey = shortcut;
-            IsRecordingToggleHotkey = false;
-        }
-        else if (IsRecordingPhraseHotkey)
-        {
-            NewHotkeyKey = shortcut;
-            IsRecordingPhraseHotkey = false;
-        }
-    }
-
-    /* Cancels any ongoing hotkey recording */
-    public void CancelRecording()
-    {
-        IsRecordingToggleHotkey = false;
-        IsRecordingPhraseHotkey = false;
-    }
-
-    [RelayCommand]
-    private void ToggleRecordingToggleHotkey()
-    {
-        if (IsRecordingToggleHotkey)
-        {
-            CancelRecording();
-        }
-        else
-        {
-            CancelRecording();
-            IsRecordingToggleHotkey = true;
-        }
-    }
-
-    [RelayCommand]
-    private void ToggleRecordingPhraseHotkey()
-    {
-        if (IsRecordingPhraseHotkey)
-        {
-            CancelRecording();
-        }
-        else
-        {
-            CancelRecording();
-            IsRecordingPhraseHotkey = true;
-        }
-    }
-
-    [RelayCommand]
-    private void ClearNewHotkeyKey()
-    {
-        NewHotkeyKey = string.Empty;
-        CancelRecording();
     }
 
     /* View Switchers */
@@ -957,296 +754,29 @@ public partial class SettingsViewModel : ViewModelBase
     [RelayCommand]
     private void SelectTab(AdvancedTab tab) => SelectedTab = tab;
 
-    /* Dictionary Actions */
+    /* Opens the rotating logs folder in the OS file manager */
     [RelayCommand]
-    private void AddDictionaryEntry()
+    private void OpenLogsFolder()
     {
-        if (
-            _dictManager == null
-            || string.IsNullOrWhiteSpace(NewDictOriginal)
-            || string.IsNullOrWhiteSpace(NewDictSpelling)
-        )
-            return;
-        var res = _dictManager.AddEntry(
-            NewDictOriginal.Trim(),
-            NewDictSpelling.Trim(),
-            NewDictCaseSensitive
-        );
-        if (res.IsSuccess)
+        try
         {
-            NewDictOriginal = string.Empty;
-            NewDictSpelling = string.Empty;
-            DictionaryEntries.Clear();
-            foreach (var e in _dictManager.GetEntries())
-                DictionaryEntries.Add(e);
-        }
-    }
-
-    [RelayCommand]
-    private void DeleteDictionaryEntry(Guid id)
-    {
-        if (_dictManager == null)
-            return;
-        var res = _dictManager.DeleteEntry(id);
-        if (res.IsSuccess)
-        {
-            DictionaryEntries.Clear();
-            foreach (var e in _dictManager.GetEntries())
-                DictionaryEntries.Add(e);
-        }
-    }
-
-    /* Hotkey Actions */
-    /* Enters the inline editable row mode to create a new hotkey profile */
-    [RelayCommand]
-    private void StartAddProfile()
-    {
-        NewProfileName = string.Empty;
-        IsRenamingProfile = false;
-        IsAddingProfile = true;
-    }
-
-    /* Enters the inline editable row mode to rename the currently selected hotkey profile */
-    [RelayCommand]
-    private void StartRenameProfile()
-    {
-        if (SelectedProfile == null)
-            return;
-
-        NewProfileName = SelectedProfile.Name;
-        IsAddingProfile = false;
-        IsRenamingProfile = true;
-    }
-
-    /* Confirms creating a new profile or renaming the selected profile, and exits the editable row mode */
-    [RelayCommand]
-    private void ConfirmAddProfile()
-    {
-        if (_profileManager == null || string.IsNullOrWhiteSpace(NewProfileName))
-            return;
-
-        string targetName = NewProfileName.Trim();
-
-        if (IsRenamingProfile)
-        {
-            if (SelectedProfile == null)
-                return;
-
-            var renameRes = _profileManager.RenameProfile(SelectedProfile.Name, targetName);
-            if (renameRes.IsSuccess)
+            string logDir = AppLogger.LogDirectory;
+            if (OperatingSystem.IsWindows())
             {
-                NewProfileName = string.Empty;
-                IsRenamingProfile = false;
-
-                _isLoading = true;
-                try
-                {
-                    LoadProfiles();
-                    RefreshHotkeyEntries();
-                }
-                finally
-                {
-                    _isLoading = false;
-                }
+                Process.Start(new ProcessStartInfo("explorer.exe", logDir) { UseShellExecute = true });
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                Process.Start(new ProcessStartInfo("open", logDir) { UseShellExecute = false });
             }
             else
             {
-                ShowModelStatusAsync(renameRes.ErrorMessage ?? "Failed to rename profile.");
-            }
-            return;
-        }
-
-        var createRes = _profileManager.CreateProfile(targetName);
-        if (createRes.IsSuccess)
-        {
-            _profileManager.SetActiveProfile(targetName);
-            NewProfileName = string.Empty;
-            IsAddingProfile = false;
-
-            _isLoading = true;
-            try
-            {
-                LoadProfiles();
-                RefreshHotkeyEntries();
-            }
-            finally
-            {
-                _isLoading = false;
-            }
-        }
-        else
-        {
-            ShowModelStatusAsync(createRes.ErrorMessage ?? "Failed to create profile.");
-        }
-    }
-
-    /* Cancels creating or renaming a hotkey profile and restores the profile selector row */
-    [RelayCommand]
-    private void CancelAddProfile()
-    {
-        NewProfileName = string.Empty;
-        IsAddingProfile = false;
-        IsRenamingProfile = false;
-    }
-
-    /* Deletes the currently selected hotkey profile and refreshes the active profile and its hotkeys */
-    [RelayCommand]
-    private void DeleteProfile()
-    {
-        if (_profileManager == null || SelectedProfile == null)
-            return;
-
-        var res = _profileManager.DeleteProfile(SelectedProfile.Name);
-        if (res.IsSuccess)
-        {
-            _isLoading = true;
-            try
-            {
-                LoadProfiles();
-                RefreshHotkeyEntries();
-            }
-            finally
-            {
-                _isLoading = false;
-            }
-        }
-        else
-        {
-            ShowModelStatusAsync(res.ErrorMessage ?? "Failed to delete profile.");
-        }
-    }
-
-    [RelayCommand]
-    private async Task AddHotkeyPhraseAsync()
-    {
-        if (
-            _hotkeyManager == null
-            || string.IsNullOrWhiteSpace(NewHotkeyKey)
-            || string.IsNullOrWhiteSpace(NewHotkeyPhrase)
-        )
-            return;
-        var res = await _hotkeyManager.AssignHotkeyAsync(
-            NewHotkeyKey.Trim(),
-            NewHotkeyPhrase.Trim()
-        );
-        if (res.IsSuccess)
-        {
-            NewHotkeyKey = string.Empty;
-            NewHotkeyPhrase = string.Empty;
-            RefreshHotkeyEntries();
-        }
-        else
-        {
-            ShowModelStatusAsync(res.ErrorMessage ?? "Failed to assign phrase shortcut.");
-        }
-    }
-
-    /* Plays pre-rendered audio for an existing hotkey phrase preview */
-    [RelayCommand]
-    private async Task PlayHotkeyPhraseAsync(Guid id)
-    {
-        if (_hotkeyManager == null)
-            return;
-
-        var res = await _hotkeyManager.PlayHotkeyAsync(id);
-        if (res.IsFailure && res.ErrorMessage != SpeechPipeline.CancelledMessage)
-            ShowModelStatusAsync(res.ErrorMessage ?? "Failed to play hotkey phrase.");
-    }
-
-    [RelayCommand]
-    private void DeleteHotkeyPhrase(Guid id)
-    {
-        if (_hotkeyManager == null)
-            return;
-        var res = _hotkeyManager.DeleteHotkey(id);
-        if (res.IsSuccess)
-        {
-            RefreshHotkeyEntries();
-        }
-    }
-
-    /* History Actions */
-    [RelayCommand]
-    private async Task PlayHistoryItemAsync(Guid id)
-    {
-        if (_historyManager == null)
-            return;
-        await _historyManager.PlayEntryAsync(id);
-    }
-
-    [RelayCommand]
-    private async Task ClearHistoryAsync()
-    {
-        if (_historyManager == null)
-            return;
-
-        var result = await _historyManager.ClearHistory();
-        if (result.IsSuccess)
-            HistoryEntries.Clear();
-    }
-
-    [RelayCommand]
-    private async Task DeleteHistoryItemAsync(Guid id)
-    {
-        if (_historyManager == null)
-            return;
-
-        var result = await _historyManager.DeleteEntry(id);
-        if (result.IsSuccess)
-        {
-            HistoryEntries.Clear();
-            foreach (var entry in _historyManager.GetHistory())
-                HistoryEntries.Add(entry);
-        }
-    }
-
-    /* Engine Management Actions */
-    [RelayCommand]
-    private async Task DownloadModelAsync(ModelStatusItem item)
-    {
-        if (_downloadManager == null || item == null || item.IsSeparator || item.IsDownloading)
-            return;
-
-        item.IsDownloading = true;
-        try
-        {
-            var progress = new Progress<double>(p => item.Progress = p);
-            var result = await _downloadManager.DownloadModelAsync(item.Model, progress);
-            item.IsDownloaded = result.IsSuccess;
-            if (result.IsSuccess)
-            {
-                UpdateAvailableModelDownloadState(item.Model, true);
-                await RefreshVoicesAsync();
+                Process.Start(new ProcessStartInfo("xdg-open", logDir) { UseShellExecute = false });
             }
         }
         catch (Exception ex)
         {
-            item.IsDownloaded = false;
-            /* Surface this through a bound status property in the UI. */
-            await Console.Error.WriteLineAsync($"Model download failed: {ex.Message}");
-        }
-        finally
-        {
-            item.IsDownloading = false;
-        }
-    }
-
-    [RelayCommand]
-    private void DeleteModel(ModelStatusItem item)
-    {
-        if (_downloadManager == null || item == null || item.IsSeparator)
-            return;
-        var res = _downloadManager.DeleteModel(item.Model);
-        if (res.IsSuccess)
-        {
-            item.IsDownloaded = false;
-            item.Progress = 0;
-            UpdateAvailableModelDownloadState(item.Model, false);
-
-            if (SelectedModel != null && SelectedModel.Id == item.Model)
-            {
-                SelectedModel = AvailableModels.FirstOrDefault(m => m.IsUnselected) ?? ModelMetadata.Unselected;
-            }
+            AppLogger.Warning("SettingsViewModel", $"Failed to open logs folder: {ex.Message}");
         }
     }
 
@@ -1255,4 +785,23 @@ public partial class SettingsViewModel : ViewModelBase
 
     [RelayCommand]
     private void ExitApp() => _windowService?.ExitApplication();
+
+    /* Unsubscribes static localization events and cancels any active background timers/downloads */
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+        _disposed = true;
+
+        LocalizationService.Instance.LanguageChanged -= OnLanguageChanged;
+        lock (_saveLock)
+        {
+            _saveDebounceCts?.Cancel();
+            _saveDebounceCts = null;
+        }
+        _statusCts?.Cancel();
+        _statusCts = null;
+        EngineManagement.CancelAllDownloads();
+        GC.SuppressFinalize(this);
+    }
 }

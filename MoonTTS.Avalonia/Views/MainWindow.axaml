@@ -52,7 +52,7 @@
                 >
                 <HyperlinkButton
                     Name="AboutBtn"
-                    AutomationProperties.Name="About Moon-TTS on GitHub"
+                    AutomationProperties.Name="{Binding L.Strings.AboutAria}"
                     NavigateUri="https://github.com/EzeRodas/Moon-TTS-CS"
                     Width="48" 
                     Height="48" 
@@ -87,7 +87,7 @@
                     <Border.BoxShadow>
                         <BoxShadows>0 4 12 0 #30000000</BoxShadows>
                     </Border.BoxShadow>
-                    <TextBlock Text="About"
+                    <TextBlock Text="{Binding L.Strings.AboutTooltip}"
                                Foreground="#111827"
                                FontSize="11"
                                FontWeight="Medium"/>
@@ -105,7 +105,7 @@
             BorderThickness="0"
             Margin="0, 6, 0, 6"
             x:Name="DragBtn"
-            AutomationProperties.Name="Drag Window"
+            AutomationProperties.Name="{Binding L.Strings.DragWindowAria}"
             PointerPressed="DragButton_PointerPressed"
             PointerReleased="DragButton_PointerReleased"
             BoxShadow="0 2 6 0 #30000000"
@@ -141,7 +141,7 @@
                 Cursor="Hand"
                 Margin="0, 6, 0, 6"
                 x:Name="SettingsBtn"
-                AutomationProperties.Name="Open Settings"
+                AutomationProperties.Name="{Binding L.Strings.OpenSettingsAria}"
                 Command="{Binding ToggleSettingsCommand}"
                 >
                 
@@ -176,8 +176,8 @@
                 <TextBox 
                     Text="{Binding TextToSpeak, Mode=TwoWay}"
                     x:Name="InputBox"
-                    AutomationProperties.Name="Text to synthesize"
-                    PlaceholderText="Insert text to synthesize" 
+                    AutomationProperties.Name="{Binding L.Strings.InputBoxAria}"
+                    PlaceholderText="{Binding L.Strings.InsertTextPlaceholder}"
                     CornerRadius="100" 
                     Padding="20,0,20,0"
                     FontSize="20" 
@@ -212,7 +212,7 @@
                     HorizontalContentAlignment="Center"
                     VerticalContentAlignment="Center"
                     x:Name="PauseBtn"
-                    AutomationProperties.Name="Pause or Resume Playback"
+                    AutomationProperties.Name="{Binding L.Strings.PauseResumeAria}"
                     Command="{Binding PauseResumeCommand}"
                     Cursor="Hand"
                 >
@@ -256,7 +256,7 @@
                     Cursor="Hand"
                     Background="#f66"
                     x:Name="StopBtn"
-                    AutomationProperties.Name="Stop Playback"
+                    AutomationProperties.Name="{Binding L.Strings.StopPlaybackAria}"
                     Command="{Binding StopCommand}"
                 >
                     <Path
@@ -316,7 +316,7 @@
                 VerticalContentAlignment="Center"
                 Cursor="Hand"
                 x:Name="PlayBtn"
-                AutomationProperties.Name="Speak Text"
+                AutomationProperties.Name="{Binding L.Strings.SpeakTextAria}"
                 Command="{Binding PlayCommand}"
             >
                 <Path
@@ -352,7 +352,7 @@
                 VerticalContentAlignment="Center"
                 Cursor="Hand"
                 Classes="CloseBtn"
-                AutomationProperties.Name="Hide Window"
+                AutomationProperties.Name="{Binding L.Strings.HideWindowAria}"
                 Command="{Binding CloseAppCommand}"
             >
                 <Path

@@ -10,7 +10,7 @@ public interface IConfigurationRepository
     /* App Config */
     AppConfig AppConfig { get; }
     void SaveAppConfig(AppConfig config);
-    event Action AppConfigChanged;
+    event Action? AppConfigChanged;
     
     /* Engine Config */
     EngineConfig GetEngineConfig(ModelId model);
@@ -19,7 +19,7 @@ public interface IConfigurationRepository
     
     /* Dictionary */
     IReadOnlyList<DictionaryEntry> DictionaryEntries { get; }
-    void SaveDictionary(List<DictionaryEntry> entries);
+    void SaveDictionary(IReadOnlyList<DictionaryEntry> entries);
     event Action? DictionaryChanged;
     
     /* Profiles */
@@ -30,11 +30,11 @@ public interface IConfigurationRepository
     
     /* Hotkeys */
     IReadOnlyList<HotkeyEntry>  Hotkeys { get; }
-    void SaveHotkeys(List<HotkeyEntry> entries);
+    void SaveHotkeys(IReadOnlyList<HotkeyEntry> entries);
     event Action? HotkeysChanged;
     
     /* History */
     IReadOnlyList<HistoryEntry> HistoryEntries { get; }
-    void SaveHistory(List<HistoryEntry> entires);
+    void SaveHistory(IReadOnlyList<HistoryEntry> entries);
     event Action? HistoryChanged;
 }

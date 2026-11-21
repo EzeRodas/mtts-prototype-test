@@ -165,6 +165,8 @@ public class WindowsShortcutHook : IGlobalShortcutHook
                 int hotkeyId = (int)msg.wParam;
                 if (_registeredCombos.TryGetValue(hotkeyId, out string? shortcutId))
                 {
+                    /* Forward foreground-activation permission granted by WM_HOTKEY to the Avalonia UI thread */
+                    LibWin32.AllowSetForegroundWindow((uint)Environment.ProcessId);
                     OnShortcutTriggered?.Invoke(shortcutId);
                 }
             } else if (msg.message == LibWin32.WM_WAKEUP)
@@ -198,6 +200,9 @@ public class WindowsShortcutHook : IGlobalShortcutHook
         public const uint MOD_WIN = 0x0008;
         public const uint MOD_NOREPEAT = 0x4000;
         
+        [DllImport("user32.dll")]
+        public static extern bool AllowSetForegroundWindow(uint dwProcessId);
+
         [DllImport("user32.dll")]
         public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
         

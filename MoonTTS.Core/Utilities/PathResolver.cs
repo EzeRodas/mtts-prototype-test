@@ -2,61 +2,71 @@ using System.Runtime.InteropServices;
 
 namespace MoonTTS.Core.Utilities;
 
-public class PathResolver
+/* File Structure:
+        - GetConfigDirectory() : string
+        - GetLogsDirectory() : string
+        - GetModelsDirectory() : string
+        - GetEnginesDirectory() : string
+        - GetXdgDataHome() : string
+*/
+
+public static class PathResolver
 {
+    /* Resolves the platform-specific configuration directory */
     public static string GetConfigDirectory()
     {
-        /* On windows retunds AppData/Moon-TTS */
+        /* On windows returns AppData/Moon-TTS */
         if (OperatingSystem.IsWindows())
         {
             return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Moon-TTS");
         }
 
-        /* On MacOS it saves to Library/Application Support/Moon-TTS, I'm not really sure if that's where it goes on Mac but I don't use mac so no idea feel free to fix it if it's wrong */
+        /* On macOS saves to ~/Library/Application Support/Moon-TTS */
         if (OperatingSystem.IsMacOS() || OperatingSystem.IsMacCatalyst())
         {
             return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Library",
                 "Application Support", "Moon-TTS");
         }
 
-        /* On Linux / POSIX it checks that the XDG_CONFIG_HOME is set, otherwise falls back to using / making the .config folder on home */
+        /* On Linux / POSIX follows XDG_CONFIG_HOME, falling back to ~/.config */
         string? configHome = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME");
-        if (string.IsNullOrEmpty(configHome))
+        if (string.IsNullOrEmpty(configHome) || !Path.IsPathRooted(configHome))
         {
             configHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config");
         }
         return Path.Combine(configHome, "Moon-TTS");
     }
-    
+
+    /* Resolves and creates the directory used for rotating diagnostic logs */
+    public static string GetLogsDirectory()
+    {
+        string logsPath = Path.Combine(GetConfigDirectory(), "logs");
+        Directory.CreateDirectory(logsPath);
+        return logsPath;
+    }
+
+    /* Resolves the default directory where downloaded TTS model weights are stored */
     public static string GetModelsDirectory()
     {
-        /* Otherwise, gets the default */
-        string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         string defaultPath;
-        
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+
+        if (OperatingSystem.IsWindows())
         {
             string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             defaultPath = Path.Combine(appData, "Moon-TTS", "models");
-        } 
-        else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-        {
-            defaultPath = Path.Combine(userProfile, "Library", "Application Support", "Moon-TTS", "models");
         }
-        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        else if (OperatingSystem.IsMacOS() || OperatingSystem.IsMacCatalyst())
         {
-            defaultPath = Path.Combine(userProfile, ".local", "share", "Moon-TTS", "models");
+            defaultPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "Library", "Application Support", "Moon-TTS", "models");
         }
         else
         {
-            defaultPath = Path.Combine(userProfile, "Moon-TTS", "models"); 
+            defaultPath = Path.Combine(GetXdgDataHome(), "Moon-TTS", "models");
         }
-        
-        /* Ensures the folders actually exist */
-        if (!Directory.Exists(defaultPath))
-        {
-            Directory.CreateDirectory(defaultPath);
-        }
+
+        Directory.CreateDirectory(defaultPath);
         return defaultPath;
     }
 
@@ -77,16 +87,21 @@ public class PathResolver
         }
         else
         {
-            /* On Linux / POSIX it follows XDG_DATA_HOME, falling back to ~/.local/share */
-            string? dataHome = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
-            if (string.IsNullOrEmpty(dataHome) || !Path.IsPathRooted(dataHome))
-            {
-                dataHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share");
-            }
-            enginesPath = Path.Combine(dataHome, "Moon-TTS", "engines");
+            enginesPath = Path.Combine(GetXdgDataHome(), "Moon-TTS", "engines");
         }
 
         Directory.CreateDirectory(enginesPath);
         return enginesPath;
+    }
+
+    /* Resolves XDG_DATA_HOME on Linux / POSIX, falling back to ~/.local/share */
+    private static string GetXdgDataHome()
+    {
+        string? dataHome = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
+        if (string.IsNullOrEmpty(dataHome) || !Path.IsPathRooted(dataHome))
+        {
+            dataHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share");
+        }
+        return dataHome;
     }
 }

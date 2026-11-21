@@ -8,6 +8,7 @@ public class AppConfig
     public ModelId ActiveModel { get; set; } = ModelId.Unselected;
     public bool AlwaysOnTop { get; set; } = true; /* Keeps the HUD above other windows, including fullscreen / borderless apps */
     public bool HideOnSynth { get; set; } = false;
+    public bool QueueSpeech { get; set; } = false; /* Queues consecutive utterances instead of interrupting active speech */
     public bool OpenOnStartup { get; set; } = false;
     public int DefaultMonitor { get; set; } = 0; /* Display monitor to start the app at */
     public bool RememberPosition { get; set; } = false;
@@ -33,4 +34,7 @@ public class AppConfig
     
     /* History */
     public bool SaveHistory { get; set; } = true;
+
+    /* UI display language code (e.g. "en", "es") */
+    public string Language { get; set; } = "en";
 }

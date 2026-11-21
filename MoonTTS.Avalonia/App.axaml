@@ -21,11 +21,11 @@
                                Command="{Binding ShowMainWindowCommand}">
                          <TrayIcon.Menu>
                              <NativeMenu>
-                                 <NativeMenuItem Header="Open Moon-TTS" Command="{Binding ShowMainWindowCommand}"/>
+                                 <NativeMenuItem Header="{Binding L.Strings.TrayOpen}" Command="{Binding ShowMainWindowCommand}"/>
                                  <!-- Place Settings item here -->
-                                 <NativeMenuItem Header="Settings" Command="{Binding ToggleSettingsCommand}"/>
+                                 <NativeMenuItem Header="{Binding L.Strings.TraySettings}" Command="{Binding ToggleSettingsCommand}"/>
                                  <NativeMenuItemSeparator/>
-                                 <NativeMenuItem Header="Exit" Command="{Binding ExitAppCommand}"/>
+                                 <NativeMenuItem Header="{Binding L.Strings.TrayExit}" Command="{Binding ExitAppCommand}"/>
                              </NativeMenu>
                          </TrayIcon.Menu>
                      </TrayIcon>

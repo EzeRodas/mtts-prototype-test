@@ -21,7 +21,7 @@ public class FormatReader
     
     public static AudioFormat GetFormatFromWavHeader(ReadOnlySpan<byte> wavSpan)
     {
-        if (wavSpan == null || wavSpan.Length < 36)
+        if (wavSpan.Length < 36)
             return new AudioFormat(24000, 1, 16);
         
         short channels = BinaryPrimitives.ReadInt16LittleEndian(wavSpan.Slice(22, 2));

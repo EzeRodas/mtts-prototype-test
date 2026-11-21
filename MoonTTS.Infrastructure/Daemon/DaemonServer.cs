@@ -32,7 +32,9 @@ public class DaemonServer
     private readonly SemaphoreSlim _engineLock = new(1, 1);
     private CancellationTokenSource? _activeSynthesisCts;
 
-    private DateTime _lastActivityTime = DateTime.UtcNow;
+    private long _lastActivityTick = Environment.TickCount64;
+    private DateTime _lastSettingsWriteUtc = DateTime.MinValue;
+    private DateTime _lastDictWriteUtc = DateTime.MinValue;
     private volatile bool _stopRequested;
 
     /* Initializes the background daemon server with engine provider, dictionary, and settings */
@@ -49,7 +51,7 @@ public class DaemonServer
     /* Runs the daemon named pipe accept loop and idle watchdog until killed or timed out */
     public async Task RunAsync(CancellationToken cancellationToken)
     {
-        _lastActivityTime = DateTime.UtcNow;
+        Interlocked.Exchange(ref _lastActivityTick, Environment.TickCount64);
 
         /* Prewarms the model when the daemon spawns */
         await _engineProvider.GetEngineAsync(cancellationToken).ConfigureAwait(false);
@@ -59,7 +61,8 @@ public class DaemonServer
             while (!timerCts.Token.IsCancellationRequested && !_stopRequested)
             {
                 await Task.Delay(5000, timerCts.Token);
-                if (DateTime.UtcNow - _lastActivityTime >= IdleTimeout)
+                long elapsedMs = Environment.TickCount64 - Interlocked.Read(ref _lastActivityTick);
+                if (elapsedMs >= IdleTimeout.TotalMilliseconds)
                 {
                     _stopRequested = true;
                     break;
@@ -77,7 +80,7 @@ public class DaemonServer
                     PipeDirection.InOut,
                     NamedPipeServerStream.MaxAllowedServerInstances,
                     PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous);
+                    PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
 
                 /* Waits for client connection with short timeout to periodically check _stopRequested */
                 using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -165,7 +168,7 @@ public class DaemonServer
 
                 case DaemonIpcProtocol.ActionStatus:
                 {
-                    int elapsed = (int)(DateTime.UtcNow - _lastActivityTime).TotalSeconds;
+                    int elapsed = (int)((Environment.TickCount64 - Interlocked.Read(ref _lastActivityTick)) / 1000);
                     var response = new DaemonResponse
                     {
                         Success = true,
@@ -200,34 +203,36 @@ public class DaemonServer
         }
     }
 
-    /* Reloads updated configs/dictionary, synthesizes sentences, and streams raw PCM chunks over IPC */
+    /* Reloads changed configs/dictionary, synthesizes sentences, and streams raw PCM chunks over IPC */
     public async Task HandleSynthesizeAsync(Stream stream, DaemonRequest request, CancellationToken cancellationToken)
     {
-        _lastActivityTime = DateTime.UtcNow;
+        Interlocked.Exchange(ref _lastActivityTick, Environment.TickCount64);
 
         CancellationTokenSource synthCts;
         lock (_synthLock)
         {
+            /* Cancel-only on superseded synthesis; each invocation owns and disposes its own CTS in finally */
             _activeSynthesisCts?.Cancel();
-            _activeSynthesisCts?.Dispose();
-            _activeSynthesisCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            synthCts = _activeSynthesisCts;
+            synthCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _activeSynthesisCts = synthCts;
         }
 
         var linkedToken = synthCts.Token;
+        bool engineLockAcquired = false;
 
         try
         {
-            await _engineLock.WaitAsync(linkedToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            return;
-        }
+            try
+            {
+                await _engineLock.WaitAsync(linkedToken).ConfigureAwait(false);
+                engineLockAcquired = true;
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
 
-        try
-        {
-            _settingsManager.ReloadAppConfig();
+            ReloadConfigIfChanged();
             var targetModel = _settingsManager.CurrentAppConfig.ActiveModel;
             if (_engineProvider.CurrentModel != targetModel)
             {
@@ -295,13 +300,32 @@ public class DaemonServer
         }
         finally
         {
-            _engineLock.Release();
+            if (engineLockAcquired)
+                _engineLock.Release();
             lock (_synthLock)
             {
-                if (_activeSynthesisCts == synthCts)
+                if (ReferenceEquals(_activeSynthesisCts, synthCts))
                     _activeSynthesisCts = null;
             }
             synthCts.Dispose();
+        }
+    }
+
+    /* Reloads repository config only when settings.json or dictionary.json changed on disk */
+    private void ReloadConfigIfChanged()
+    {
+        string configDir = PathResolver.GetConfigDirectory();
+        string settingsPath = Path.Combine(configDir, "settings.json");
+        string dictPath = Path.Combine(configDir, "dictionary.json");
+
+        DateTime settingsWrite = File.Exists(settingsPath) ? File.GetLastWriteTimeUtc(settingsPath) : DateTime.MinValue;
+        DateTime dictWrite = File.Exists(dictPath) ? File.GetLastWriteTimeUtc(dictPath) : DateTime.MinValue;
+
+        if (settingsWrite != _lastSettingsWriteUtc || dictWrite != _lastDictWriteUtc)
+        {
+            _lastSettingsWriteUtc = settingsWrite;
+            _lastDictWriteUtc = dictWrite;
+            _settingsManager.ReloadAppConfig();
         }
     }
 }

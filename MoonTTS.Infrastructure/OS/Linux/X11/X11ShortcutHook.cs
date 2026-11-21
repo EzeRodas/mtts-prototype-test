@@ -51,9 +51,12 @@ public class X11ShortcutHook : IGlobalShortcutHook
     private readonly Lock _displayLock = new();
     private IntPtr _display;
     private ulong _rootWindow;
+    private int _x11Fd = -1;
+    private int _wakeReadFd = -1;
+    private int _wakeWriteFd = -1;
     private Thread? _eventThread;
     private volatile bool _isRunning;
-    private DateTime _lastTriggerTime = DateTime.MinValue;
+    private readonly Dictionary<string, long> _lastTriggerTicks = new();
 
     /* Maps the exact (ModifierState, KeyCode) -> Shortcut ID */
     private readonly Dictionary<(uint, uint), string> _registeredCombos = new();
@@ -61,7 +64,7 @@ public class X11ShortcutHook : IGlobalShortcutHook
     public event Action<string>? OnShortcutTriggered;
 
     /* Called once when the app starts */
-    public Task InitializeAsync()
+    public unsafe Task InitializeAsync()
     {
         lock (_displayLock)
         {
@@ -71,16 +74,24 @@ public class X11ShortcutHook : IGlobalShortcutHook
             _display = LibX11.XOpenDisplay(null);
             if (_display == IntPtr.Zero)
                 throw new InvalidOperationException("Failed to open x11 Display");
-            
+
             /* Get the desktop root background window to listen globally */
             _rootWindow = LibX11.XDefaultRootWindow(_display);
+            _x11Fd = LibX11.XConnectionNumber(_display);
+
+            int* fds = stackalloc int[2];
+            if (LibX11.pipe(fds) == 0)
+            {
+                _wakeReadFd = fds[0];
+                _wakeWriteFd = fds[1];
+            }
         }
-        
-        /* Starts the background thread to listen for X11 events */
+
+        /* Starts the background thread to listen for X11 events via blocking poll() */
         _isRunning = true;
-        _eventThread = new Thread(EventLoop) {IsBackground = true};
+        _eventThread = new Thread(EventLoop) { IsBackground = true, Name = "X11ShortcutLoop" };
         _eventThread.Start();
-        
+
         return Task.CompletedTask;
     }
 
@@ -185,18 +196,19 @@ public class X11ShortcutHook : IGlobalShortcutHook
         };
     }
 
-    /* Wakes up every 50 milliseconds to check if the X11 server tried to notify the app */
-    private void EventLoop()
+    /* Blocks on poll() for X11 socket readiness or shutdown wakeup pipe (0% idle CPU, <1ms latency) */
+    private unsafe void EventLoop()
     {
         LibX11.XEvent xevent = new LibX11.XEvent();
+        LibX11.PollFd* fds = stackalloc LibX11.PollFd[2];
+        var triggeredIds = new List<string>(2);
 
         while (_isRunning)
         {
-            string? triggeredId = null;
+            triggeredIds.Clear();
 
             lock (_displayLock)
             {
-                /* XPending checks if there are events waiting, if not, sleeps to avoid cpu overload */
                 while (_display != IntPtr.Zero && LibX11.XPending(_display) > 0)
                 {
                     LibX11.XNextEvent(_display, ref xevent);
@@ -206,29 +218,44 @@ public class X11ShortcutHook : IGlobalShortcutHook
                         uint keycode = xevent.xkey.keycode;
                         uint state = xevent.xkey.state & SignificantModifiersMask;
 
-                        /* If X11 returns one of our registered combos, invokes the associated action */
                         if (_registeredCombos.TryGetValue((state, keycode), out string? shortcutId))
                         {
-                            /* Ignore auto-repeat spam if it fired less than 500ms ago */
-                            /* Is it necessary? I'm not sure, but windows has a built-in feature to avoid this,
-                               so it doesn't hurt to prevent */
-                            if ((DateTime.UtcNow - _lastTriggerTime).TotalMilliseconds > 500)
+                            /* Per-shortcut debounce suppresses key-repeat while still allowing distinct shortcuts back-to-back */
+                            long now = Environment.TickCount64;
+                            if (!_lastTriggerTicks.TryGetValue(shortcutId, out long lastTick) || (now - lastTick) > 350)
                             {
-                                _lastTriggerTime = DateTime.UtcNow;
-                                triggeredId = shortcutId;
+                                _lastTriggerTicks[shortcutId] = now;
+                                triggeredIds.Add(shortcutId);
                             }
                         }
                     }
                 }
             }
 
-            if (triggeredId != null)
+            foreach (string id in triggeredIds)
             {
-                OnShortcutTriggered?.Invoke(triggeredId);
+                OnShortcutTriggered?.Invoke(id);
             }
 
-            /* 50 millisecond pause */
-            Thread.Sleep(50);
+            if (!_isRunning)
+                break;
+
+            if (_x11Fd >= 0 && _wakeReadFd >= 0)
+            {
+                fds[0] = new LibX11.PollFd { fd = _x11Fd, events = LibX11.POLLIN };
+                fds[1] = new LibX11.PollFd { fd = _wakeReadFd, events = LibX11.POLLIN };
+
+                int ready = LibX11.poll(fds, 2, -1);
+                if (ready > 0 && (fds[1].revents & LibX11.POLLIN) != 0)
+                {
+                    byte dummy = 0;
+                    _ = LibX11.read(_wakeReadFd, &dummy, 1);
+                }
+            }
+            else
+            {
+                Thread.Sleep(50);
+            }
         }
     }
 
@@ -239,10 +266,18 @@ public class X11ShortcutHook : IGlobalShortcutHook
         return 0;
     }
 
-    /* Disposes the process */
-    public void Dispose()
+    /* Disposes the process and wakes the blocked poll() loop */
+    public unsafe void Dispose()
     {
         _isRunning = false;
+
+        if (_wakeWriteFd >= 0)
+        {
+            byte signal = 1;
+            _ = LibX11.write(_wakeWriteFd, &signal, 1);
+        }
+
+        _eventThread?.Join(500);
 
         lock (_displayLock)
         {
@@ -252,6 +287,10 @@ public class X11ShortcutHook : IGlobalShortcutHook
                 LibX11.XCloseDisplay(_display);
                 _display = IntPtr.Zero;
             }
+            _x11Fd = -1;
+
+            if (_wakeReadFd >= 0) { LibX11.close(_wakeReadFd); _wakeReadFd = -1; }
+            if (_wakeWriteFd >= 0) { LibX11.close(_wakeWriteFd); _wakeWriteFd = -1; }
         }
     }
 
@@ -275,6 +314,34 @@ public class X11ShortcutHook : IGlobalShortcutHook
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         public delegate int XErrorHandlerDelegate(IntPtr display, ref XErrorEvent error_event);
+
+        public const short POLLIN = 0x0001;
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct PollFd
+        {
+            public int fd;
+            public short events;
+            public short revents;
+        }
+
+        [DllImport(LibName)]
+        public static extern int XConnectionNumber(IntPtr display);
+
+        [DllImport("libc")]
+        public static extern unsafe int poll(PollFd* fds, nuint nfds, int timeout);
+
+        [DllImport("libc")]
+        public static extern unsafe int pipe(int* fds);
+
+        [DllImport("libc")]
+        public static extern unsafe nint read(int fd, byte* buf, nuint count);
+
+        [DllImport("libc")]
+        public static extern unsafe nint write(int fd, byte* buf, nuint count);
+
+        [DllImport("libc")]
+        public static extern int close(int fd);
 
         [DllImport(LibName)]
         public static extern IntPtr XOpenDisplay(string? display_name);

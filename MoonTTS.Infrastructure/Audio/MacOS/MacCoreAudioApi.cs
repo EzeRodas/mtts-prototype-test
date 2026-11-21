@@ -6,7 +6,7 @@ namespace MoonTTS.Infrastructure.Audio;
 
 internal static class MacCoreAudioApi
 {
-    private const string CoreAudioLib = "/System/Library/Frameworks/CodeAudio.framework/CoreAudio";
+    private const string CoreAudioLib = "/System/Library/Frameworks/CoreAudio.framework/CoreAudio";
     private const string AudioToolboxLib = "/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox";
     private const string CoreFoundationLib = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
     
@@ -26,7 +26,7 @@ internal static class MacCoreAudioApi
     public const uint kAudioFormatFlagIsSignedInteger = 4;
     public const uint kAudioFormatFlagIsPacked = 8;
     
-    public const uint kAudioQueueProperty_CurrentDevice  = 0x6c70636d; /* aqcd */
+    public const uint kAudioQueueProperty_CurrentDevice  = 0x61716364; /* aqcd */
     public const uint kAudioQueueParam_Volume  = 1;
     
     /* Structs */
@@ -69,12 +69,25 @@ internal static class MacCoreAudioApi
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    public struct AudioQueueBuffer
+    {
+        public uint mAudioDataBytesCapacity;
+        public IntPtr mAudioData;
+        public uint mAudioDataByteSize;
+        public IntPtr mUserData;
+        public uint mPacketDescriptionCapacity;
+        public IntPtr mPacketDescriptions;
+        public uint mPacketDescriptionCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     public struct CFRange
     {
         public nint Location;
-        public nint Lenght;
+        public nint Length;
     }
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void AudioQueueOutputCallback(IntPtr inUserData, IntPtr inAQ, IntPtr inBuffer);
     
     /* P/Invoke for CoreAudio */
@@ -146,7 +159,7 @@ internal static class MacCoreAudioApi
     /* P/Invoke */
 
     [DllImport(CoreFoundationLib)]
-    public static extern nint CFStringGetLenght(IntPtr theString);
+    public static extern nint CFStringGetLength(IntPtr theString);
 
     [DllImport(CoreFoundationLib)]
     public static extern void CFStringGetCharacters(IntPtr theString, CFRange range, IntPtr buffer);
@@ -167,7 +180,7 @@ internal static class MacCoreAudioApi
         if (cfString == IntPtr.Zero) return null;
         try
         {
-            nint len = CFStringGetLenght(cfString);
+            nint len = CFStringGetLength(cfString);
             if (len == 0) return string.Empty;
 
             char[] buffer = new char[len];
@@ -176,7 +189,7 @@ internal static class MacCoreAudioApi
             {
                 CFStringGetCharacters(
                     cfString,
-                    new CFRange { Location = 0, Lenght = len },
+                    new CFRange { Location = 0, Length = len },
                     handle.AddrOfPinnedObject());
                 return new string(buffer);
             }

@@ -119,11 +119,13 @@ public class LinuxAudioPlayer : IAudioPlayer
         Stop();
 
         /* Sets up the linked cts for this session */
+        CancellationTokenSource sessionCts;
         CancellationToken linkedToken;
         lock (_sessionLock)
         {
-            _playbackCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            linkedToken = _playbackCts.Token;
+            sessionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _playbackCts = sessionCts;
+            linkedToken = sessionCts.Token;
             _isPaused = false;
         }
 
@@ -169,6 +171,12 @@ public class LinuxAudioPlayer : IAudioPlayer
         
         if (sessionTargets.Count == 0)
         {
+            lock (_sessionLock)
+            {
+                if (ReferenceEquals(_playbackCts, sessionCts))
+                    _playbackCts = null;
+            }
+            sessionCts.Dispose();
             return Result.Failure(
                 lastOpenError ?? "Failed to initialize any Linux audio output stream targets.");
         }
@@ -263,6 +271,12 @@ public class LinuxAudioPlayer : IAudioPlayer
         finally
         {
             Stop();
+            lock (_sessionLock)
+            {
+                if (ReferenceEquals(_playbackCts, sessionCts))
+                    _playbackCts = null;
+            }
+            sessionCts.Dispose();
         }
     }
 
@@ -306,8 +320,6 @@ public class LinuxAudioPlayer : IAudioPlayer
         lock (_sessionLock)
         {
             _playbackCts?.Cancel();
-            _playbackCts?.Dispose();
-            _playbackCts = null;
 
             foreach (var target in _activeTargets)
             {

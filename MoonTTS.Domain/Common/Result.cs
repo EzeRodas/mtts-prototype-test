@@ -2,7 +2,7 @@ namespace MoonTTS.Domain.Common;
 
 using System;
 
-public struct Result
+public readonly struct Result
 {
     public bool IsSuccess { get; }
     public bool IsFailure => !IsSuccess;

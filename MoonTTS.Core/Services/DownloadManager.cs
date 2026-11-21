@@ -1,4 +1,3 @@
-using MoonTTS.Core.Utilities;
 using MoonTTS.Domain.Common;
 using MoonTTS.Domain.Interfaces;
 using MoonTTS.Domain.ValueObjects;
@@ -12,6 +11,7 @@ namespace MoonTTS.Core.Services;
             SettingsManager settingsManager)
         - GetAvailableModels() : IEnumerable<ModelMetadata>
         - GetEngines() : IReadOnlyList<EngineDescriptor>
+        - RefreshEngines() : void
         - IsModelDownloaded(ModelId modelId) : bool
         - DownloadModelAsync(
             ModelId modelId,
@@ -49,6 +49,9 @@ public class DownloadManager
     {
         return _modelRegistry.GetEngines();
     }
+
+    /* Re-scans the engines directory to pick up newly added or removed engine folders */
+    public void RefreshEngines() => _modelRegistry.Refresh();
 
     /* Checks if the file exists */
     public bool IsModelDownloaded(ModelId modelId)
@@ -107,7 +110,8 @@ public class DownloadManager
             return Result.Failure($"Model '{modelId}' is not provided by any installed engine.");
 
         string modelsDir = _settingsManager.GetModelDirectory(modelId);
-        Directory.CreateDirectory(modelsDir);
+        if (!Directory.Exists(modelsDir))
+            return Result.Failure($"No files found for model '{modelId}'.");
 
         bool anyDeleted = false;
 
@@ -142,7 +146,7 @@ public class DownloadManager
         }
         catch (Exception ex)
         {
-            return Result.Failure($"Failed tod delete model files: {ex.Message}", ex);
+            return Result.Failure($"Failed to delete model files: {ex.Message}", ex);
         }
     }
 }

@@ -1,6 +1,7 @@
+using System;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Input;
-using Avalonia.Controls;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -12,14 +13,14 @@ namespace MoonTTS.Avalonia.ViewModels;
 
 /* File Structure:
         - MainViewModel()
-        - MainViewModel(ISpeechPipeline?, IWindowService?, HotkeyManager, HistoryManager?)
+        - MainViewModel(ISpeechPipeline?, IWindowService?, HistoryManager?)
         - CanPlay : bool
         - OnTextToSpeakChanged(string) : void
         - NavigateHistoryUp() : void
         - NavigateHistoryDown() : void
         - ShowHistoryEntry(int) : void
         - PlayAsync() : Task
-        - ShowStatusAsync(string message) : void
+        - ShowStatus(string message) : void
         - SyncPlaybackState() : void
         - Stop() : void
         - PauseResume() : void
@@ -29,7 +30,6 @@ public partial class MainViewModel : ViewModelBase
 {
     private readonly ISpeechPipeline? _speechPipeline;
     private readonly IWindowService? _windowService;
-    private readonly HotkeyManager _hotKeyManager;
     private readonly HistoryManager? _historyManager;
 
     /* Position in the history while browsing it with the arrow keys (0 is the newest entry, -1 is the typed draft) */
@@ -37,7 +37,8 @@ public partial class MainViewModel : ViewModelBase
     private string _draftText = string.Empty;
     private bool _isNavigatingHistory;
     private bool _isLaunchingSpeech;
-    
+    private CancellationTokenSource? _statusCts;
+
     public ICommand? CloseAppCommand { get; }
     public ICommand? ShowMainWindowCommand { get; }
     public ICommand? ExitAppCommand { get; }
@@ -54,29 +55,24 @@ public partial class MainViewModel : ViewModelBase
     /* Transient feedback shown in the popup above the input box (e.g. no model selected) */
     [ObservableProperty] private string? _statusMessage;
 
-    /* Constructor */
+    /* Design-time constructor */
     public MainViewModel() : this(null, null, null) { }
-    
-    /* Initializes main view model with speech pipeline and window management service */
+
+    /* Initializes main view model with unified speech pipeline, window service, and history navigation */
     public MainViewModel(
-        ISpeechPipeline? speechPipeline, 
-        IWindowService? windowService, 
-        HotkeyManager hotKeyManager,
+        ISpeechPipeline? speechPipeline,
+        IWindowService? windowService,
         HistoryManager? historyManager = null)
     {
         _historyManager = historyManager;
         if (_historyManager != null)
-        {
             _historyManager.OnHistoryChanged += () => _historyIndex = -1;
-            _historyManager.OnPlaybackStateChanged += () => Dispatcher.UIThread.Post(SyncPlaybackState);
-        }
 
         _speechPipeline = speechPipeline;
         if (_speechPipeline != null)
             _speechPipeline.PlaybackStateChanged += () => Dispatcher.UIThread.Post(SyncPlaybackState);
 
         _windowService = windowService;
-        _hotKeyManager = hotKeyManager;
 
         if (_windowService != null)
         {
@@ -86,7 +82,7 @@ public partial class MainViewModel : ViewModelBase
             /* Tray options */
             ShowMainWindowCommand = new RelayCommand(_windowService.ShowMainWindow);
             ExitAppCommand = new RelayCommand(_windowService.ExitApplication);
-            
+
             /* Settings menu */
             ToggleSettingsCommand = new RelayCommand(_windowService.ToggleSettingsWindow);
         }
@@ -143,7 +139,7 @@ public partial class MainViewModel : ViewModelBase
         }
     }
 
-    public bool CanPlay => !IsSynthesizing && !string.IsNullOrWhiteSpace(TextToSpeak);
+    public bool CanPlay => !string.IsNullOrWhiteSpace(TextToSpeak);
 
     /* Initiates speech synthesis and streaming playback for the entered text.
        On failure the text is restored and the error is shown in the status popup */
@@ -164,7 +160,7 @@ public partial class MainViewModel : ViewModelBase
             _windowService?.HideOnSynth();
             var result = await _speechPipeline.SpeakAsync(text);
 
-            /* A cancellation comes from the user pressing Stop, so it is not reported */
+            /* A cancellation comes from the user pressing Stop or superseding speech, so it is not reported */
             if (result.IsFailure && result.ErrorMessage != SpeechPipeline.CancelledMessage)
             {
                 if (string.IsNullOrEmpty(TextToSpeak))
@@ -172,7 +168,10 @@ public partial class MainViewModel : ViewModelBase
 
                 /* HideOnSynth may have hidden the window; bring it back so the popup and restored text are visible */
                 _windowService?.RevealMainWindow();
-                ShowStatusAsync(result.ErrorMessage ?? "Speech synthesis failed.");
+                string errorMsg = result.ErrorMessage == SpeechPipeline.NoModelSelectedMessage
+                    ? L.Strings.NoModelSelected
+                    : (result.ErrorMessage ?? L.Strings.SpeechSynthesisFailed);
+                ShowStatus(errorMsg);
             }
         }
         finally
@@ -182,60 +181,64 @@ public partial class MainViewModel : ViewModelBase
         }
     }
 
-    /* Shows a transient message in the status popup and clears it after a few seconds,
-       unless a newer message replaced it in the meantime */
-    private async void ShowStatusAsync(string message)
+    /* Shows a transient status message for 5 seconds, cancelling any earlier timer cleanly */
+    private void ShowStatus(string message)
+    {
+        _statusCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _statusCts = cts;
+        var token = cts.Token;
+
+        StatusMessage = message;
+        _ = ClearStatusAfterDelayAsync(cts, token);
+    }
+
+    /* Clears StatusMessage after 5 seconds unless superseded by a newer message */
+    private async Task ClearStatusAfterDelayAsync(CancellationTokenSource cts, CancellationToken token)
     {
         try
         {
-            StatusMessage = message;
-            await Task.Delay(5000);
-            if (StatusMessage == message)
+            await Task.Delay(5000, token);
+            if (!token.IsCancellationRequested)
                 StatusMessage = null;
         }
-        catch
+        catch (OperationCanceledException)
         {
-            /* Ignored */
+            /* Superseded by newer status message */
+        }
+        finally
+        {
+            if (ReferenceEquals(_statusCts, cts))
+                _statusCts = null;
+            cts.Dispose();
         }
     }
 
-    /* Mirrors playback state from both the main pipeline (including hotkeys) and standalone history playback */
+    /* Mirrors unified playback state from the speech pipeline (typed speech, hotkeys, and history previews) */
     private void SyncPlaybackState()
     {
-        IsSynthesizing = _isLaunchingSpeech
-                         || (_speechPipeline?.IsSpeaking == true)
-                         || (_historyManager?.IsPlaying == true);
-        IsPaused = (_speechPipeline?.IsPaused == true)
-                   || (_historyManager?.IsPaused == true);
+        IsSynthesizing = _isLaunchingSpeech || (_speechPipeline?.IsSpeaking == true);
+        IsPaused = _speechPipeline?.IsPaused == true;
     }
-    
-    /* Cancels ongoing speech synthesis and stops audio playback across HUD, hotkeys, and history */
+
+    /* Cancels ongoing speech synthesis and stops audio playback */
     [RelayCommand]
     private void Stop()
     {
         _speechPipeline?.Stop();
-        _historyManager?.Stop();
         SyncPlaybackState();
     }
 
-    /* Toggles between pausing and resuming whichever audio source is currently active */
+    /* Toggles between pausing and resuming active playback */
     [RelayCommand]
     private void PauseResume()
     {
+        if (_speechPipeline == null) return;
+
         if (!IsPaused)
-        {
-            if (_speechPipeline?.IsSpeaking == true)
-                _speechPipeline.Pause();
-            else if (_historyManager?.IsPlaying == true)
-                _historyManager.Pause();
-        }
+            _speechPipeline.Pause();
         else
-        {
-            if (_speechPipeline?.IsSpeaking == true || _speechPipeline?.IsPaused == true)
-                _speechPipeline.Resume();
-            else if (_historyManager?.IsPlaying == true || _historyManager?.IsPaused == true)
-                _historyManager.Resume();
-        }
+            _speechPipeline.Resume();
 
         SyncPlaybackState();
     }

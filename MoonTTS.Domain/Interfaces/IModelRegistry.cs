@@ -18,4 +18,7 @@ public interface IModelRegistry
 
     /* Looks up the installed engine that owns a model */
     EngineDescriptor? GetEngine(string engineId);
+
+    /* Re-scans the engines directory for newly installed or removed engine manifests */
+    void Refresh();
 }

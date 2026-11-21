@@ -146,11 +146,13 @@ public class MacAudioPlayer : IAudioPlayer
 
         Stop();
 
+        CancellationTokenSource sessionCts;
         CancellationToken linkedToken;
         lock (_processLock)
         {
-            _playbackCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            linkedToken = _playbackCts.Token;
+            sessionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _playbackCts = sessionCts;
+            linkedToken = sessionCts.Token;
         }
 
         byte[] rawArray = pcmBytes.ToArray();
@@ -172,8 +174,12 @@ public class MacAudioPlayer : IAudioPlayer
             }
 
             var results = await Task.WhenAll(tasks);
-            Result? failure = results.FirstOrDefault(r => r.IsFailure);
-            return failure ?? Result.Success();
+            foreach (var res in results)
+            {
+                if (res.IsFailure)
+                    return res;
+            }
+            return Result.Success();
         }
         catch (OperationCanceledException)
         {
@@ -182,6 +188,12 @@ public class MacAudioPlayer : IAudioPlayer
         finally
         {
             Stop();
+            lock (_processLock)
+            {
+                if (ReferenceEquals(_playbackCts, sessionCts))
+                    _playbackCts = null;
+            }
+            sessionCts.Dispose();
         }
     }
 
@@ -197,7 +209,8 @@ public class MacAudioPlayer : IAudioPlayer
     }
 
 
-    private Task<Result> PlayQueueStreamAsync(
+    /* Allocates and plays a single CoreAudio AudioQueue buffer with rooted callback and 64-bit safe struct access */
+    private async Task<Result> PlayQueueStreamAsync(
         byte[] pcmBytes,
         AudioFormat format,
         string? deviceUid,
@@ -205,7 +218,7 @@ public class MacAudioPlayer : IAudioPlayer
         bool isPrimary,
         CancellationToken token)
     {
-        var tcs = new TaskCompletionSource<Result>();
+        var tcs = new TaskCompletionSource<Result>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         int channels = Math.Max((short)1, format.Channels);
         int bytesPerSample = Math.Max(1, format.BitDepth / 8);
@@ -224,66 +237,72 @@ public class MacAudioPlayer : IAudioPlayer
             mReserved = 0
         };
 
+        /* Root the callback delegate until playback completes so GC cannot collect it while native AudioQueue holds it */
         MacCoreAudioApi.AudioQueueOutputCallback callback = (userData, queue, buffer) =>
         {
-            /* Fired when the audio buffer completes playback */
             tcs.TrySetResult(Result.Success());
         };
+        GCHandle callbackHandle = GCHandle.Alloc(callback);
 
-        if (MacCoreAudioApi.AudioQueueNewOutput(ref asbd, callback, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, 0,
-                out IntPtr queue) != 0)
+        try
         {
-            return Task.FromResult(Result.Failure("Failed to create macOS AudioQueue"));
-        }
-
-        lock (_processLock)
-        {
-            if (isPrimary) _primaryQueue = queue;
-            else _monitorQueue = queue;
-        }
-
-        /* Routes to target CoreAudio device UID */
-        if (!string.IsNullOrEmpty(deviceUid))
-        {
-            IntPtr cfUid = MacCoreAudioApi.StringToCFString(deviceUid);
-            try
+            if (MacCoreAudioApi.AudioQueueNewOutput(ref asbd, callback, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, 0,
+                    out IntPtr queue) != 0)
             {
-                MacCoreAudioApi.AudioQueueSetProperty(
-                    queue,
-                    MacCoreAudioApi.kAudioQueueProperty_CurrentDevice,
-                    ref cfUid,
-                    (uint)IntPtr.Size);
+                return Result.Failure("Failed to create macOS AudioQueue");
             }
-            finally
+
+            lock (_processLock)
             {
-                MacCoreAudioApi.CFRelease(cfUid);
+                if (isPrimary) _primaryQueue = queue;
+                else _monitorQueue = queue;
             }
-        }
-        
-        /* Sets initial volume */
-        MacCoreAudioApi.AudioQueueSetParameter(queue, MacCoreAudioApi.kAudioQueueParam_Volume, volume);
-        
-        /* Allocates and populates the buffer */
-        if (MacCoreAudioApi.AudioQueueAllocateBuffer(queue, (uint)pcmBytes.Length, out IntPtr bufferPtr) != 0)
-        {
-            return Task.FromResult(Result.Failure("Failed to allocate AudioQueue buffer."));
-        }
-        
-        /* Writes PCM data to buffer pointer */
-        IntPtr dataptr = Marshal.ReadIntPtr(bufferPtr, 4); /* Offsets to mAudioData in AudioQueueBuffer */
-        Marshal.Copy(pcmBytes, 0, dataptr, pcmBytes.Length);
-        Marshal.WriteInt32(bufferPtr, 12, pcmBytes.Length); /* mAudioDataSize */
 
-        MacCoreAudioApi.AudioQueueEnqueueBuffer(queue, bufferPtr, 0, IntPtr.Zero);
-        MacCoreAudioApi.AudioQueueStart(queue, IntPtr.Zero);
-        
-        /* Cancellation token registration */
-        token.Register(() =>
-        {
-            tcs.TrySetCanceled(token);
-        });
+            /* Routes to target CoreAudio device UID */
+            if (!string.IsNullOrEmpty(deviceUid))
+            {
+                IntPtr cfUid = MacCoreAudioApi.StringToCFString(deviceUid);
+                try
+                {
+                    MacCoreAudioApi.AudioQueueSetProperty(
+                        queue,
+                        MacCoreAudioApi.kAudioQueueProperty_CurrentDevice,
+                        ref cfUid,
+                        (uint)IntPtr.Size);
+                }
+                finally
+                {
+                    MacCoreAudioApi.CFRelease(cfUid);
+                }
+            }
 
-        return tcs.Task;
+            /* Sets initial volume */
+            MacCoreAudioApi.AudioQueueSetParameter(queue, MacCoreAudioApi.kAudioQueueParam_Volume, volume);
+
+            /* Allocates and populates the buffer using 64-bit aligned AudioQueueBuffer layout */
+            if (MacCoreAudioApi.AudioQueueAllocateBuffer(queue, (uint)pcmBytes.Length, out IntPtr bufferPtr) != 0)
+            {
+                return Result.Failure("Failed to allocate AudioQueue buffer.");
+            }
+
+            unsafe
+            {
+                var aqBuf = (MacCoreAudioApi.AudioQueueBuffer*)bufferPtr;
+                Marshal.Copy(pcmBytes, 0, aqBuf->mAudioData, pcmBytes.Length);
+                aqBuf->mAudioDataByteSize = (uint)pcmBytes.Length;
+            }
+
+            MacCoreAudioApi.AudioQueueEnqueueBuffer(queue, bufferPtr, 0, IntPtr.Zero);
+            MacCoreAudioApi.AudioQueueStart(queue, IntPtr.Zero);
+
+            using var reg = token.Register(() => tcs.TrySetCanceled(token));
+            return await tcs.Task.ConfigureAwait(false);
+        }
+        finally
+        {
+            if (callbackHandle.IsAllocated)
+                callbackHandle.Free();
+        }
     }
 
     public void Pause()
@@ -309,8 +328,6 @@ public class MacAudioPlayer : IAudioPlayer
         lock (_processLock)
         {
             _playbackCts?.Cancel();
-            _playbackCts?.Dispose();
-            _playbackCts = null;
 
             if (_primaryQueue != IntPtr.Zero)
             {

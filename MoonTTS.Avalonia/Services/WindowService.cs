@@ -13,7 +13,7 @@ using MoonTTS.Domain.Interfaces;
 namespace MoonTTS.Avalonia.Services;
 
 /* File Structure:
-        - WindowService(MainWindow, IClassicDesktopStyleApplicationLifetime, SettingsManager, IAudioPlayer, DownloadManager, DictionaryManager, HotkeyManager, HistoryManager, ITtsEngineProvider, IWindowOverlayHelper, ProfileManager?)
+        - WindowService(MainWindow, IClassicDesktopStyleApplicationLifetime, SettingsManager, IWindowOverlayHelper, Func<SettingsViewModel>)
         - OnMainWindowOpened(object?, EventArgs) : void
         - OnMainWindowActivated(object?, EventArgs) : void
         - OnMainWindowDeactivated(object?, EventArgs) : void
@@ -31,7 +31,6 @@ namespace MoonTTS.Avalonia.Services;
         - HideSettingsWindow() : void
         - ApplyAlwaysOnTop(bool) : void
         - GetHandle(Window) : nint
-        - PositionSettingsWindow() : void
 */
 
 public class WindowService : IWindowService
@@ -39,44 +38,28 @@ public class WindowService : IWindowService
     private readonly MainWindow _mainWindow;
     private readonly IClassicDesktopStyleApplicationLifetime _desktop;
     private readonly SettingsManager _settingsManager;
+    private readonly IWindowOverlayHelper _overlayHelper;
+    private readonly Func<SettingsViewModel> _settingsViewModelFactory;
+
     private PixelPoint _lastPos;
     private SettingsWindow? _settingsWindow;
     private bool _suppressNextSettingsToggle;
-    private readonly IAudioPlayer _audioPlayer;
-    private readonly DownloadManager _downloadManager;
-    private readonly DictionaryManager _dictionaryManager;
-    private readonly HotkeyManager _hotkeyManager;
-    private readonly HistoryManager _historyManager;
-    private readonly ITtsEngineProvider _engineProvider;
-    private readonly IWindowOverlayHelper _overlayHelper;
-    private readonly ProfileManager? _profileManager;
+    private readonly Lock _posSaveLock = new();
     private CancellationTokenSource? _posSaveDebounceCts;
 
-    /* Initializes window service with main window, desktop lifetime, and settings */
+    /* Initializes window service with main window, desktop lifetime, settings, overlay helper, and settings VM factory */
     public WindowService(
         MainWindow mainWindow,
         IClassicDesktopStyleApplicationLifetime desktop,
         SettingsManager settingsManager,
-        IAudioPlayer audioPlayer,
-        DownloadManager downloadManager,
-        DictionaryManager dictionaryManager,
-        HotkeyManager hotkeyManager,
-        HistoryManager historyManager,
-        ITtsEngineProvider engineProvider,
         IWindowOverlayHelper overlayHelper,
-        ProfileManager? profileManager = null)
+        Func<SettingsViewModel> settingsViewModelFactory)
     {
         _mainWindow = mainWindow;
         _desktop = desktop;
         _settingsManager = settingsManager;
-        _audioPlayer = audioPlayer;
-        _downloadManager = downloadManager;
-        _dictionaryManager = dictionaryManager;
-        _hotkeyManager = hotkeyManager;
-        _historyManager = historyManager;
-        _engineProvider = engineProvider;
         _overlayHelper = overlayHelper;
-        _profileManager = profileManager;
+        _settingsViewModelFactory = settingsViewModelFactory;
 
         _mainWindow.Opened += OnMainWindowOpened;
         _mainWindow.Activated += OnMainWindowActivated;
@@ -146,8 +129,8 @@ public class WindowService : IWindowService
                 _settingsManager.CurrentAppConfig.AlwaysOnTop);
         }, DispatcherPriority.Background);
     }
-    
-    /* Updates cached coordinate state and debounces disk persistence when RememberPosition is enabled */ 
+
+    /* Updates cached coordinate state and debounces disk persistence when RememberPosition is enabled */
     private void OnMainWindowPositionChanged(object? sender, PixelPointEventArgs e)
     {
         if (!_mainWindow.IsVisible)
@@ -161,11 +144,16 @@ public class WindowService : IWindowService
         config.PosX = e.Point.X;
         config.PosY = e.Point.Y;
 
-        _posSaveDebounceCts?.Cancel();
-        _posSaveDebounceCts?.Dispose();
-        var cts = new CancellationTokenSource();
-        _posSaveDebounceCts = cts;
-        var token = cts.Token;
+        /* Cancel-only on superseded debounce; each task clears the field under _posSaveLock before disposing */
+        CancellationTokenSource cts;
+        CancellationToken token;
+        lock (_posSaveLock)
+        {
+            _posSaveDebounceCts?.Cancel();
+            cts = new CancellationTokenSource();
+            _posSaveDebounceCts = cts;
+            token = cts.Token;
+        }
 
         _ = Task.Run(async () =>
         {
@@ -179,7 +167,16 @@ public class WindowService : IWindowService
             {
                 /* Superseded by newer window drag position or application exit */
             }
-        }, token);
+            finally
+            {
+                lock (_posSaveLock)
+                {
+                    if (ReferenceEquals(_posSaveDebounceCts, cts))
+                        _posSaveDebounceCts = null;
+                }
+                cts.Dispose();
+            }
+        });
     }
 
     /* Shows and activates the main window, focuses the input if visible but unfocused, or hides it if already focused */
@@ -214,6 +211,17 @@ public class WindowService : IWindowService
     {
         HideSettingsWindow();
 
+        /* On Linux X11/XWayland, window managers (e.g. KWin) only evaluate WM_TRANSIENT_FOR for fullscreen-layer
+           parenting at map time; activating an already-mapped window switches away from / minimizes fullscreen games.
+           Unmapping and remapping lets PrepareBeforeShow attach the transient hint before the window maps. */
+        if (OperatingSystem.IsLinux())
+        {
+            _lastPos = _mainWindow.Position;
+            _mainWindow.Hide();
+            ShowAndPositionMainWindow();
+            return;
+        }
+
         var config = _settingsManager.CurrentAppConfig;
         nint handle = GetHandle(_mainWindow);
 
@@ -243,7 +251,7 @@ public class WindowService : IWindowService
         if (config.RememberPosition && _lastPos != default)
         {
             _mainWindow.Position = _lastPos;
-        } 
+        }
         else if (!config.RememberPosition)
         {
             _mainWindow.PositionAtBottomCenter(monitorIndex: config.DefaultMonitor);
@@ -287,12 +295,17 @@ public class WindowService : IWindowService
     /* Saves window coordinates and shuts down the desktop application */
     public void ExitApplication()
     {
-        _posSaveDebounceCts?.Cancel();
-        _posSaveDebounceCts?.Dispose();
-        _posSaveDebounceCts = null;
+        lock (_posSaveLock)
+        {
+            _posSaveDebounceCts?.Cancel();
+            _posSaveDebounceCts = null;
+        }
 
         if (_settingsWindow?.DataContext is SettingsViewModel settingsVm)
+        {
             settingsVm.FlushPendingSave();
+            settingsVm.Dispose();
+        }
 
         var config = _settingsManager.CurrentAppConfig;
         if (config.RememberPosition)
@@ -360,16 +373,7 @@ public class WindowService : IWindowService
 
         if (_settingsWindow == null)
         {
-            var viewModel = new SettingsViewModel(
-                _settingsManager,
-                _audioPlayer,
-                this,
-                _downloadManager,
-                _dictionaryManager,
-                _hotkeyManager,
-                _historyManager,
-                _engineProvider,
-                _profileManager);
+            var viewModel = _settingsViewModelFactory();
             _settingsWindow = new SettingsWindow
             {
                 DataContext = viewModel
@@ -395,7 +399,7 @@ public class WindowService : IWindowService
         _overlayHelper.ConfigureOverlayWindow(GetHandle(_settingsWindow), alwaysOnTop);
         _settingsWindow.Activate();
     }
-    
+
     /* Flushes pending settings and hides the settings window if currently visible */
     public void HideSettingsWindow()
     {
@@ -408,7 +412,7 @@ public class WindowService : IWindowService
                 _settingsWindow.Hide();
         }
     }
-    
+
     /* Applies the always-on-top state to the visible windows immediately; hidden ones pick it up when shown */
     public void ApplyAlwaysOnTop(bool alwaysOnTop)
     {
@@ -426,44 +430,4 @@ public class WindowService : IWindowService
 
     /* Returns the native handle of a window (XID, HWND or NSWindow), or 0 when it has none yet */
     private static nint GetHandle(Window window) => window.TryGetPlatformHandle()?.Handle ?? 0;
-
-    /* Positions the settings window directly above the HUD Settings button */
-    private void PositionSettingsWindow()
-    {
-        if (_settingsWindow == null) return;
-
-        double scaling = _mainWindow.RenderScaling > 0 ? _mainWindow.RenderScaling : 1.0;
-
-        /* Settings button horizontal offset in MainWindow: Hyperlink(48) + Spacing(12) + Drag(48) + Spacing(12) = 120px */
-        int btnOffsetX = (int)Math.Round(120 * scaling);
-        int targetX = _mainWindow.Position.X + btnOffsetX;
-
-        /* Position directly above the HUD with 8px margin */
-        int targetY = _mainWindow.Position.Y - (int)Math.Round((_settingsWindow.Height + 8) * scaling);
-
-        var screen = _mainWindow.Screens.ScreenFromWindow(_mainWindow) ?? _mainWindow.Screens.Primary;
-        if (screen != null)
-        {
-            var workingArea = screen.WorkingArea;
-            int winWidthPx = (int)Math.Round(_settingsWindow.Width * scaling);
-
-            /* Clamps X within screen working area boundaries */
-            if (targetX + winWidthPx > workingArea.Right)
-            {
-                targetX = workingArea.Right - winWidthPx - (int)Math.Round(12 * scaling);
-            }
-            if (targetX < workingArea.BottomLeft.X)
-            {
-                targetX = workingArea.BottomLeft.X + (int)Math.Round(12 * scaling);
-            }
-
-            /* If not enough room above HUD, flips to below the HUD */
-            if (targetY < workingArea.TopLeft.Y)
-            {
-                targetY = _mainWindow.Position.Y + (int)Math.Round((_mainWindow.Height + 8) * scaling);
-            }
-        }
-
-        _settingsWindow.Position = new PixelPoint(targetX, targetY);
-    }
 }

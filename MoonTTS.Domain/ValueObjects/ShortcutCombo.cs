@@ -1,6 +1,6 @@
 namespace MoonTTS.Domain.ValueObjects;
 
-public class ShortcutCombo
+public sealed class ShortcutCombo : IEquatable<ShortcutCombo>
 {
     public bool HasCtrl { get; }
     public bool HasAlt { get; }
@@ -106,4 +106,25 @@ public class ShortcutCombo
 
         return string.Join("+", parts);
     }
+
+    /* Value equality comparison based on modifiers and normalized main key */
+    public bool Equals(ShortcutCombo? other)
+    {
+        if (ReferenceEquals(null, other)) return false;
+        if (ReferenceEquals(this, other)) return true;
+        return HasCtrl == other.HasCtrl
+               && HasAlt == other.HasAlt
+               && HasShift == other.HasShift
+               && HasWin == other.HasWin
+               && string.Equals(MainKey, other.MainKey, StringComparison.Ordinal);
+    }
+
+    /* Value equality comparison for boxed/object references */
+    public override bool Equals(object? obj) => obj is ShortcutCombo other && Equals(other);
+
+    /* Hash code consistent with value equality */
+    public override int GetHashCode() => HashCode.Combine(HasCtrl, HasAlt, HasShift, HasWin, MainKey);
+
+    public static bool operator ==(ShortcutCombo? left, ShortcutCombo? right) => Equals(left, right);
+    public static bool operator !=(ShortcutCombo? left, ShortcutCombo? right) => !Equals(left, right);
 }

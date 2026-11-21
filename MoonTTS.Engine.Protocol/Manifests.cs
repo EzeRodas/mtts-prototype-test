@@ -27,6 +27,7 @@ public sealed class EngineModelManifest
     public string? CpuUsage { get; set; }
     public List<string>? Languages { get; set; }
     public Dictionary<string, string> DownloadFiles { get; set; } = new();
+    public Dictionary<string, string>? FileChecksums { get; set; }
 }
 
 /* voices.json: voices per model id. Written by the host from the ListVoices reply when an entry is missing */

@@ -1,6 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:MoonTTS.Avalonia.ViewModels"
+        xmlns:settingsVm="using:MoonTTS.Avalonia.ViewModels.Settings"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:entities="using:MoonTTS.Domain.Entities"
@@ -73,7 +74,7 @@
                     ColumnDefinitions="*,Auto,Auto"
                     >
                     <TextBlock 
-                        Text="Quick settings" 
+                        Text="{Binding L.Strings.QuickSettingsTitle}" 
                         FontSize="18" 
                         Background="{StaticResource SurfaceBrush}" 
                         FontWeight="Bold" 
@@ -82,7 +83,7 @@
                     
                     <Panel Grid.Column="1" Margin="0,0,6,0">
                         <Button Name="SwitchAdvancedBtn" Classes="btn-icon"
-                                AutomationProperties.Name="Switch Settings Mode"
+                                AutomationProperties.Name="{Binding L.Strings.SwitchSettingsModeAria}"
                                 Command="{Binding SwitchToAdvancedCommand}">
                             <Path Data="M16 4h4v4 M14 10l6-6 M8 20H4v-4 M4 20l6-6 M16 20h4v-4 M14 14l6 6 M8 4H4v4 M4 4l6 6"
                                   Stroke="{StaticResource TextSecondaryBrush}" StrokeThickness="2" Width="14" Height="14" Stretch="Uniform"/>
@@ -93,14 +94,14 @@
                                VerticalOffset="6"
                                IsLightDismissEnabled="False">
                             <Border Classes="tooltip-popup">
-                                <TextBlock Text="Advanced Settings" Classes="tooltip-popup-text"/>
+                                <TextBlock Text="{Binding L.Strings.AdvancedSettingsTooltip}" Classes="tooltip-popup-text"/>
                             </Border>
                         </Popup>
                     </Panel>
 
                     <Panel Grid.Column="2">
                         <Button Name="CloseSettingsBtn" Classes="btn-icon"
-                                AutomationProperties.Name="Close Settings"
+                                AutomationProperties.Name="{Binding L.Strings.CloseSettingsAria}"
                                 Command="{Binding CloseCommand}">
                             <Path Data="M18 6l-12 12 M6 6l12 12" Stroke="{StaticResource TextSecondaryBrush}" StrokeThickness="2" Width="12" Height="12" Stretch="Uniform"/>
                         </Button>
@@ -110,7 +111,7 @@
                                VerticalOffset="6"
                                IsLightDismissEnabled="False">
                             <Border Classes="tooltip-popup">
-                                <TextBlock Text="Close (Escape)" Classes="tooltip-popup-text"/>
+                                <TextBlock Text="{Binding L.Strings.CloseEscapeTooltip}" Classes="tooltip-popup-text"/>
                             </Border>
                         </Popup>
                     </Panel>
@@ -122,10 +123,10 @@
                     <StackPanel Spacing="10">
                         <Grid ColumnDefinitions="75,*">
                             <StackPanel Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
-                                <TextBlock Text="Model" Classes="field-label" VerticalAlignment="Center"/>
+                                <TextBlock Text="{Binding L.Strings.ModelLabel}" Classes="field-label" VerticalAlignment="Center"/>
                                 <Panel VerticalAlignment="Center">
                                     <Button Name="QuickInfoBtn" Classes="btn-info"
-                                            AutomationProperties.Name="Engine Management Information"
+                                            AutomationProperties.Name="{Binding L.Strings.EngineManagementInfoAria}"
                                             Command="{Binding NavigateToEngineManagementCommand}">
                                         <Path Data="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z M12 16v-4 M12 8h.01"
                                               Stroke="{StaticResource TextMutedBrush}" StrokeThickness="1.8"
@@ -146,7 +147,7 @@
                                             <Border.BoxShadow>
                                                 <BoxShadows>0 4 12 0 #20000000</BoxShadows>
                                             </Border.BoxShadow>
-                                            <TextBlock Text="To download a TTS Engine please head to the &quot;Engine Management&quot; tab on the Advanced Settings menu."
+                                            <TextBlock Text="{Binding L.Strings.DownloadEngineInfoTooltip}"
                                                        Foreground="{StaticResource TextSecondaryBrush}"
                                                        FontSize="12"
                                                        TextWrapping="Wrap"/>
@@ -187,7 +188,7 @@
                                                     <Border.BoxShadow>
                                                         <BoxShadows>0 4 12 0 #20000000</BoxShadows>
                                                     </Border.BoxShadow>
-                                                    <TextBlock Text="To download a TTS Engine please head to the &quot;Engine Management&quot; tab on the Advanced Settings menu. Click to open it."
+                                                    <TextBlock Text="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).L.Strings.DownloadEngineHoverTooltip}"
                                                                Foreground="{StaticResource TextSecondaryBrush}"
                                                                FontSize="12"
                                                                TextWrapping="Wrap"/>
@@ -200,7 +201,7 @@
                         </Grid>
                         
                         <Grid ColumnDefinitions="70,*">
-                            <TextBlock Text="Voice" Classes="field-label" VerticalAlignment="Center"/>
+                            <TextBlock Text="{Binding L.Strings.VoiceLabel}" Classes="field-label" VerticalAlignment="Center"/>
                             <ComboBox Grid.Column="1" ItemsSource="{Binding AvailableVoices}" SelectedItem="{Binding SelectedVoice}" HorizontalAlignment="Stretch">
                                 <ComboBox.ItemTemplate>
                                     <DataTemplate x:DataType="valueObjects:VoiceInfo">
@@ -216,7 +217,7 @@
                 <Border Classes="card-section">
                     <StackPanel Spacing="8">
                         <Grid ColumnDefinitions="*,Auto">
-                            <TextBlock Text="Audio Output" Classes="field-label" VerticalAlignment="Center"/>
+                            <TextBlock Text="{Binding L.Strings.AudioOutputLabel}" Classes="field-label" VerticalAlignment="Center"/>
                             <ToggleSwitch Grid.Column="1" IsChecked="{Binding EnablePrimaryPlayback}" OnContent="" OffContent=""/>
                         </Grid>
                         <ComboBox ItemsSource="{Binding AvailableOutputDevices}" 
@@ -241,7 +242,7 @@
                 <Border Classes="card-section">
                     <StackPanel Spacing="8">
                         <Grid ColumnDefinitions="*,Auto">
-                            <TextBlock Text="Monitoring" Classes="field-label" VerticalAlignment="Center"/>
+                            <TextBlock Text="{Binding L.Strings.MonitoringLabel}" Classes="field-label" VerticalAlignment="Center"/>
                             <ToggleSwitch Grid.Column="1" IsChecked="{Binding EnableMonitorPlayback}" OnContent="" OffContent=""/>
                         </Grid>
                         <ComboBox ItemsSource="{Binding AvailableOutputDevices}" 
@@ -293,23 +294,23 @@
                 <Border Grid.Column="0" Background="{StaticResource BackgroundBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,1,0" Padding="16">
                     <DockPanel>
                         <StackPanel DockPanel.Dock="Bottom" Spacing="8">
-                            <Button Content="&lt; Quick Settings" Command="{Binding SwitchToQuickCommand}" 
+                            <Button Content="{Binding L.Strings.BackToQuickSettings}" Command="{Binding SwitchToQuickCommand}" 
                                     Background="Transparent" Foreground="{StaticResource PrimaryBrush}" FontWeight="Bold" 
                                     HorizontalAlignment="Stretch" Cursor="Hand"/>
-                            <Button Content="Exit Moon-TTS" Command="{Binding ExitAppCommand}" 
+                            <Button Content="{Binding L.Strings.ExitMoonTts}" Command="{Binding ExitAppCommand}" 
                                     Background="Transparent" Foreground="{StaticResource DangerBrush}" FontWeight="Bold" 
                                     HorizontalAlignment="Stretch" Cursor="Hand"/>
                         </StackPanel>
 
                         <StackPanel Spacing="4">
-                            <TextBlock Text="ADVANCED" FontSize="11" FontWeight="Bold" Foreground="{StaticResource TextMutedBrush}" Margin="8,0,0,8"/>
-                            <Button Content="General" Command="{Binding SelectTabCommand}" CommandParameter="{x:Static vm:AdvancedTab.General}" Classes.active="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.General}}" Classes="nav-item"/>
-                            <Button Content="Audio" Command="{Binding SelectTabCommand}" CommandParameter="{x:Static vm:AdvancedTab.Audio}" Classes.active="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.Audio}}" Classes="nav-item"/>
-                            <Button Content="Dictionary" Command="{Binding SelectTabCommand}" CommandParameter="{x:Static vm:AdvancedTab.Dictionary}" Classes.active="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.Dictionary}}" Classes="nav-item"/>
-                            <Button Content="TTS Engine" Command="{Binding SelectTabCommand}" CommandParameter="{x:Static vm:AdvancedTab.Engine}" Classes.active="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.Engine}}" Classes="nav-item"/>
-                            <Button Content="Engine Management" Command="{Binding SelectTabCommand}" CommandParameter="{x:Static vm:AdvancedTab.EngineManagement}" Classes.active="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.EngineManagement}}" Classes="nav-item"/>
-                            <Button Content="Hotkeys" Command="{Binding SelectTabCommand}" CommandParameter="{x:Static vm:AdvancedTab.Hotkeys}" Classes.active="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.Hotkeys}}" Classes="nav-item"/>
-                            <Button Content="History" Command="{Binding SelectTabCommand}" CommandParameter="{x:Static vm:AdvancedTab.History}" Classes.active="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.History}}" Classes="nav-item"/>
+                            <TextBlock Text="{Binding L.Strings.AdvancedHeader}" FontSize="11" FontWeight="Bold" Foreground="{StaticResource TextMutedBrush}" Margin="8,0,0,8"/>
+                            <Button Content="{Binding L.Strings.GeneralTab}" Command="{Binding SelectTabCommand}" CommandParameter="{x:Static vm:AdvancedTab.General}" Classes.active="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.General}}" Classes="nav-item"/>
+                            <Button Content="{Binding L.Strings.AudioTab}" Command="{Binding SelectTabCommand}" CommandParameter="{x:Static vm:AdvancedTab.Audio}" Classes.active="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.Audio}}" Classes="nav-item"/>
+                            <Button Content="{Binding L.Strings.DictionaryTab}" Command="{Binding SelectTabCommand}" CommandParameter="{x:Static vm:AdvancedTab.Dictionary}" Classes.active="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.Dictionary}}" Classes="nav-item"/>
+                            <Button Content="{Binding L.Strings.TtsEngineTab}" Command="{Binding SelectTabCommand}" CommandParameter="{x:Static vm:AdvancedTab.Engine}" Classes.active="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.Engine}}" Classes="nav-item"/>
+                            <Button Content="{Binding L.Strings.EngineManagementTab}" Command="{Binding SelectTabCommand}" CommandParameter="{x:Static vm:AdvancedTab.EngineManagement}" Classes.active="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.EngineManagement}}" Classes="nav-item"/>
+                            <Button Content="{Binding L.Strings.HotkeysTab}" Command="{Binding SelectTabCommand}" CommandParameter="{x:Static vm:AdvancedTab.Hotkeys}" Classes.active="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.Hotkeys}}" Classes="nav-item"/>
+                            <Button Content="{Binding L.Strings.HistoryTab}" Command="{Binding SelectTabCommand}" CommandParameter="{x:Static vm:AdvancedTab.History}" Classes.active="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.History}}" Classes="nav-item"/>
                         </StackPanel>
                     </DockPanel>
                 </Border>
@@ -320,22 +321,34 @@
                         <Panel>
                             <!-- General Tab -->
                             <StackPanel Spacing="16" IsVisible="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.General}}">
-                                <TextBlock Text="General Settings" Classes="section-title"/>
-                                <TextBlock Text="Configure startup display and window behavior." Classes="section-desc"/>
-                                <CheckBox Content="Keep HUD always on top of other windows, including fullscreen and borderless apps" IsChecked="{Binding AlwaysOnTop}"/>
-                                <CheckBox Content="Hide HUD automatically when speech begins" IsChecked="{Binding HideOnSynth}"/>
-                                <CheckBox Content="Remember HUD window coordinates on screen" IsChecked="{Binding RememberPosition}"/>
-                                <CheckBox Content="Start minimized to system tray" IsChecked="{Binding OpenOnStartup}"/>
-                                <CheckBox Content="Create Linux Virtual Microphone null-sink on startup" IsChecked="{Binding CreateMicOnStartup}" IsVisible="{Binding IsLinux}"/>
+                                <TextBlock Text="{Binding L.Strings.GeneralSettingsTitle}" Classes="section-title"/>
+                                <TextBlock Text="{Binding L.Strings.GeneralSettingsDesc}" Classes="section-desc"/>
+                                <Grid ColumnDefinitions="*,200" Margin="0,0,0,4">
+                                    <TextBlock Text="{Binding L.Strings.LanguageLabel}" Classes="field-label" VerticalAlignment="Center"/>
+                                    <ComboBox Grid.Column="1" ItemsSource="{Binding AvailableLanguages}" SelectedItem="{Binding SelectedLanguage}" HorizontalAlignment="Stretch">
+                                        <ComboBox.ItemTemplate>
+                                            <DataTemplate x:DataType="entities:LanguageOption">
+                                                <TextBlock Text="{Binding DisplayName}"/>
+                                            </DataTemplate>
+                                        </ComboBox.ItemTemplate>
+                                    </ComboBox>
+                                </Grid>
+                                <CheckBox Content="{Binding L.Strings.AlwaysOnTopCheck}" IsChecked="{Binding AlwaysOnTop}"/>
+                                <CheckBox Content="{Binding L.Strings.HideOnSynthCheck}" IsChecked="{Binding HideOnSynth}"/>
+                                <CheckBox Content="{Binding L.Strings.QueueSpeechCheck}" IsChecked="{Binding QueueSpeech}"/>
+                                <CheckBox Content="{Binding L.Strings.RememberPositionCheck}" IsChecked="{Binding RememberPosition}"/>
+                                <CheckBox Content="{Binding L.Strings.StartMinimizedCheck}" IsChecked="{Binding OpenOnStartup}"/>
+                                <CheckBox Content="{Binding L.Strings.CreateVirtualMicCheck}" IsChecked="{Binding CreateMicOnStartup}" IsVisible="{Binding IsLinux}"/>
+                                <Button Content="{Binding L.Strings.OpenLogsButton}" Command="{Binding OpenLogsFolderCommand}" Classes="hotkey-btn" HorizontalAlignment="Left" Margin="0,4,0,0"/>
                             </StackPanel>
 
                             <!-- Audio Tab -->
                             <StackPanel Spacing="16" IsVisible="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.Audio}}">
-                                <TextBlock Text="Audio Settings" Classes="section-title"/>
+                                <TextBlock Text="{Binding L.Strings.AudioSettingsTitle}" Classes="section-title"/>
                                 <Border Classes="card-section">
                                     <StackPanel Spacing="10">
                                         <Grid ColumnDefinitions="*,Auto">
-                                            <TextBlock Text="Audio Playback" Classes="field-label"/>
+                                            <TextBlock Text="{Binding L.Strings.AudioPlaybackLabel}" Classes="field-label"/>
                                             <ToggleSwitch Grid.Column="1" IsChecked="{Binding EnablePrimaryPlayback}" OnContent="" OffContent=""/>
                                         </Grid>
                                         <ComboBox ItemsSource="{Binding AvailableOutputDevices}" SelectedItem="{Binding SelectedPrimaryDevice}" HorizontalAlignment="Stretch">
@@ -350,7 +363,7 @@
                                 <Border Classes="card-section">
                                     <StackPanel Spacing="10">
                                         <Grid ColumnDefinitions="*,Auto">
-                                            <TextBlock Text="Audio Monitoring (Virtual Mic)" Classes="field-label"/>
+                                            <TextBlock Text="{Binding L.Strings.AudioMonitoringVirtualMicLabel}" Classes="field-label"/>
                                             <ToggleSwitch Grid.Column="1" IsChecked="{Binding EnableMonitorPlayback}" OnContent="" OffContent=""/>
                                         </Grid>
                                         <ComboBox ItemsSource="{Binding AvailableOutputDevices}" SelectedItem="{Binding SelectedMonitorDevice}" HorizontalAlignment="Stretch">
@@ -366,33 +379,33 @@
 
                             <!-- Dictionary Tab -->
                             <StackPanel Spacing="16" IsVisible="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.Dictionary}}">
-                                <TextBlock Text="Phonetic Dictionary" Classes="section-title"/>
+                                <TextBlock Text="{Binding L.Strings.PhoneticDictionaryTitle}" Classes="section-title"/>
                                 <Border Classes="card-section">
                                     <StackPanel Spacing="10">
-                                        <TextBlock Text="Add Word Replacement" Classes="field-label"/>
+                                        <TextBlock Text="{Binding L.Strings.AddWordReplacementLabel}" Classes="field-label"/>
                                         <Grid ColumnDefinitions="*,*,Auto">
-                                            <TextBox Text="{Binding NewDictOriginal}" PlaceholderText="Original word" Margin="0,0,6,0"/>
-                                            <TextBox Grid.Column="1" Text="{Binding NewDictSpelling}" PlaceholderText="Spelling replacement" Margin="0,0,6,0"/>
-                                            <Button Grid.Column="2" Content="Add" Command="{Binding AddDictionaryEntryCommand}" Classes="btn-primary" Cursor="Hand"/>
+                                            <TextBox Text="{Binding Dictionary.NewDictOriginal}" PlaceholderText="{Binding L.Strings.OriginalWordPlaceholder}" Margin="0,0,6,0"/>
+                                            <TextBox Grid.Column="1" Text="{Binding Dictionary.NewDictSpelling}" PlaceholderText="{Binding L.Strings.SpellingReplacementPlaceholder}" Margin="0,0,6,0"/>
+                                            <Button Grid.Column="2" Content="{Binding L.Strings.AddButton}" Command="{Binding Dictionary.AddEntryCommand}" Classes="btn-primary" Cursor="Hand"/>
                                         </Grid>
-                                        <CheckBox Content="Case sensitive" IsChecked="{Binding NewDictCaseSensitive}"/>
+                                        <CheckBox Content="{Binding L.Strings.CaseSensitiveCheck}" IsChecked="{Binding Dictionary.NewDictCaseSensitive}"/>
                                     </StackPanel>
                                 </Border>
-                                <ListBox ItemsSource="{Binding DictionaryEntries}" Height="200" Classes="data-list">
+                                <ListBox ItemsSource="{Binding Dictionary.Entries}" Height="200" Classes="data-list">
                                     <ListBox.ItemTemplate>
                                         <DataTemplate x:DataType="entities:DictionaryEntry">
                                             <Grid ColumnDefinitions="*,*,Auto">
                                                 <TextBlock Text="{Binding Original}" VerticalAlignment="Center"/>
                                                 <TextBlock Grid.Column="1" Text="{Binding Spelling}" Foreground="{StaticResource PrimaryBrush}" VerticalAlignment="Center"/>
                                                 <Panel Grid.Column="2">
-                                                    <Button Name="DeleteDictBtn" AutomationProperties.Name="Delete Dictionary Entry" Content="✕" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).DeleteDictionaryEntryCommand}" CommandParameter="{Binding Id}" Classes="btn-icon btn-delete"/>
+                                                    <Button Name="DeleteDictBtn" AutomationProperties.Name="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).L.Strings.DeleteDictionaryEntryAria}" Content="✕" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).Dictionary.DeleteEntryCommand}" CommandParameter="{Binding Id}" Classes="btn-icon btn-delete"/>
                                                     <Popup IsOpen="{Binding IsPointerOver, ElementName=DeleteDictBtn}"
                                                            PlacementTarget="{Binding ElementName=DeleteDictBtn}"
                                                            Placement="Top"
                                                            VerticalOffset="-4"
                                                            IsLightDismissEnabled="False">
                                                         <Border Classes="tooltip-popup">
-                                                            <TextBlock Text="Delete" Classes="tooltip-popup-text"/>
+                                                            <TextBlock Text="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).L.Strings.DeleteButton}" Classes="tooltip-popup-text"/>
                                                         </Border>
                                                     </Popup>
                                                 </Panel>
@@ -404,12 +417,12 @@
 
                             <!-- TTS Engine Tab -->
                             <StackPanel Spacing="16" IsVisible="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.Engine}}">
-                                <TextBlock Text="TTS Engine Configuration" Classes="section-title"/>
+                                <TextBlock Text="{Binding L.Strings.TtsEngineConfigTitle}" Classes="section-title"/>
                                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
-                                    <TextBlock Text="Active Model" Classes="field-label" VerticalAlignment="Center"/>
+                                    <TextBlock Text="{Binding L.Strings.ActiveModelLabel}" Classes="field-label" VerticalAlignment="Center"/>
                                     <Panel VerticalAlignment="Center">
                                         <Button Name="AdvancedInfoBtn" Classes="btn-info"
-                                                AutomationProperties.Name="Engine Management Information"
+                                                AutomationProperties.Name="{Binding L.Strings.EngineManagementInfoAria}"
                                                 Command="{Binding NavigateToEngineManagementCommand}">
                                             <Path Data="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z M12 16v-4 M12 8h.01"
                                                   Stroke="{StaticResource TextMutedBrush}" StrokeThickness="1.8"
@@ -430,7 +443,7 @@
                                                 <Border.BoxShadow>
                                                     <BoxShadows>0 4 12 0 #20000000</BoxShadows>
                                                 </Border.BoxShadow>
-                                                <TextBlock Text="To download a TTS Engine please head to the &quot;Engine Management&quot; tab on the Advanced Settings menu."
+                                                <TextBlock Text="{Binding L.Strings.DownloadEngineInfoTooltip}"
                                                            Foreground="{StaticResource TextSecondaryBrush}"
                                                            FontSize="12"
                                                            TextWrapping="Wrap"/>
@@ -471,7 +484,7 @@
                                                     <Border.BoxShadow>
                                                         <BoxShadows>0 4 12 0 #20000000</BoxShadows>
                                                     </Border.BoxShadow>
-                                                    <TextBlock Text="To download a TTS Engine please head to the &quot;Engine Management&quot; tab on the Advanced Settings menu. Click to open it."
+                                                    <TextBlock Text="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).L.Strings.DownloadEngineHoverTooltip}"
                                                                Foreground="{StaticResource TextSecondaryBrush}"
                                                                FontSize="12"
                                                                TextWrapping="Wrap"/>
@@ -483,7 +496,7 @@
                                 </ComboBox>
                                 <TextBlock Text="{Binding ModelStatusMessage}" Foreground="{StaticResource DangerBrush}" TextWrapping="Wrap"
                                            IsVisible="{Binding ModelStatusMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
-                                <TextBlock Text="Voice Preset" Classes="field-label"/>
+                                <TextBlock Text="{Binding L.Strings.VoicePresetLabel}" Classes="field-label"/>
                                 <ComboBox ItemsSource="{Binding AvailableVoices}" SelectedItem="{Binding SelectedVoice}" HorizontalAlignment="Stretch">
                                     <ComboBox.ItemTemplate>
                                         <DataTemplate x:DataType="valueObjects:VoiceInfo">
@@ -492,22 +505,27 @@
                                     </ComboBox.ItemTemplate>
                                 </ComboBox>
                                 <Grid ColumnDefinitions="*,50">
-                                    <TextBlock Text="Synthesis Speed" Classes="field-label"/>
+                                    <TextBlock Text="{Binding L.Strings.SynthesisSpeedLabel}" Classes="field-label"/>
                                     <TextBlock Grid.Column="1" Text="{Binding SpeechSpeed, StringFormat={}{0:0.0}x}" FontWeight="SemiBold" HorizontalAlignment="Right"/>
                                 </Grid>
                                 <Slider Minimum="0.5" Maximum="2.0" Value="{Binding SpeechSpeed}"/>
-                                <TextBlock Text="Custom Models Directory" Classes="field-label"/>
-                                <TextBox Text="{Binding CustomModelsDirectory}" PlaceholderText="Default (~/.local/share/Moon-TTS/models/)"/>
+                                <TextBlock Text="{Binding L.Strings.CustomModelsDirectoryLabel}" Classes="field-label"/>
+                                <TextBox Text="{Binding CustomModelsDirectory}" PlaceholderText="{Binding L.Strings.CustomModelsDirectoryPlaceholder}"/>
                             </StackPanel>
 
                             <!-- Engine Management Tab -->
                             <StackPanel Spacing="16" IsVisible="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.EngineManagement}}">
-                                <TextBlock Text="Engine Management" Classes="section-title"/>
-                                <TextBlock Text="Manage, download, and delete local neural model files." Classes="section-desc"/>
+                                <Grid ColumnDefinitions="*,Auto">
+                                    <TextBlock Text="{Binding L.Strings.EngineManagementTitle}" Classes="section-title"/>
+                                    <Button Grid.Column="1" Content="{Binding L.Strings.RescanEnginesButton}" Command="{Binding EngineManagement.RescanEnginesCommand}" Classes="hotkey-btn" Cursor="Hand"/>
+                                </Grid>
+                                <TextBlock Text="{Binding L.Strings.EngineManagementDesc}" Classes="section-desc"/>
+                                <TextBlock Text="{Binding ModelStatusMessage}" Foreground="{StaticResource DangerBrush}" TextWrapping="Wrap"
+                                           IsVisible="{Binding ModelStatusMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
 
-                                <ItemsControl ItemsSource="{Binding ModelStatuses}">
+                                <ItemsControl ItemsSource="{Binding EngineManagement.ModelStatuses}">
                                     <ItemsControl.ItemTemplate>
-                                        <DataTemplate x:DataType="vm:ModelStatusItem">
+                                        <DataTemplate x:DataType="settingsVm:ModelStatusItem">
                                             <Panel>
                                                 <!-- Engine Group Separator & Header -->
                                                 <StackPanel IsVisible="{Binding IsSeparator}" Margin="0,14,0,8" Spacing="6">
@@ -577,12 +595,14 @@
                                                                 </Panel>
                                                             </WrapPanel>
                                                             <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                                                                <TextBlock Text="✓ Installed" Foreground="{StaticResource SuccessBrush}" FontWeight="Bold" 
+                                                                <TextBlock Text="{Binding L.Strings.InstalledBadge}" Foreground="{StaticResource SuccessBrush}" FontWeight="Bold"
                                                                            VerticalAlignment="Center" IsVisible="{Binding IsDownloaded}"/>
-                                                                <Button Content="Delete" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).DeleteModelCommand}" 
+                                                                <Button Content="{Binding L.Strings.DeleteButton}" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).EngineManagement.DeleteModelCommand}"
                                                                         CommandParameter="{Binding}" Classes="btn-danger" IsVisible="{Binding CanDelete}" Cursor="Hand"/>
-                                                                <Button Content="Download" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).DownloadModelCommand}" 
+                                                                <Button Content="{Binding L.Strings.DownloadButton}" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).EngineManagement.DownloadModelCommand}"
                                                                         CommandParameter="{Binding}" Classes="btn-primary" IsVisible="{Binding CanDownload}" Cursor="Hand"/>
+                                                                <Button Content="{Binding L.Strings.CancelDownloadButton}" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).EngineManagement.CancelDownloadCommand}"
+                                                                        CommandParameter="{Binding}" Classes="btn-danger" IsVisible="{Binding IsDownloading}" Cursor="Hand"/>
                                                             </StackPanel>
                                                         </StackPanel>
                                                         <ProgressBar Value="{Binding Progress}" Minimum="0" Maximum="100" Height="4" CornerRadius="2" IsVisible="{Binding IsDownloading}"/>
@@ -596,29 +616,29 @@
 
                             <!-- Hotkeys Tab -->
                             <StackPanel Spacing="8" IsVisible="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.Hotkeys}}">
-                                <TextBlock Text="Global Hotkeys" Classes="section-title"/>
+                                <TextBlock Text="{Binding L.Strings.GlobalHotkeysTitle}" Classes="section-title"/>
 
-                                <TextBlock Text="Global Toggle Shortcut" Classes="field-label"/>
+                                <TextBlock Text="{Binding L.Strings.GlobalToggleShortcutLabel}" Classes="field-label"/>
 
                                 <!-- Global Toggle Hotkey Detection -->
                                 <Grid ColumnDefinitions="*,Auto">
                                     <Button Classes="hotkey-btn"
-                                            Classes.recording="{Binding IsRecordingToggleHotkey}"
-                                            Content="{Binding ToggleHotkeyDisplayText}"
-                                            Command="{Binding ToggleRecordingToggleHotkeyCommand}"
+                                            Classes.recording="{Binding Hotkeys.IsRecordingToggleHotkey}"
+                                            Content="{Binding Hotkeys.ToggleHotkeyDisplayText}"
+                                            Command="{Binding Hotkeys.ToggleRecordingToggleHotkeyCommand}"
                                             HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"/>
-                                    <Button Grid.Column="1" Content="{Binding ToggleRecordButtonText}"
-                                            Command="{Binding ToggleRecordingToggleHotkeyCommand}"
+                                    <Button Grid.Column="1" Content="{Binding Hotkeys.ToggleRecordButtonText}"
+                                            Command="{Binding Hotkeys.ToggleRecordingToggleHotkeyCommand}"
                                             Classes="btn-primary" Margin="8,0,0,0"/>
                                 </Grid>
 
-                                <TextBlock Text="Active Profile" Classes="field-label"/>
+                                <TextBlock Text="{Binding L.Strings.ActiveProfileLabel}" Classes="field-label"/>
                                 <!-- Profile Selector & Editable Row Swap -->
                                 <Panel>
                                     <!-- Normal Selector Mode -->
-                                    <Grid ColumnDefinitions="*,Auto,Auto,Auto" IsVisible="{Binding !IsEditingProfile}">
-                                        <ComboBox ItemsSource="{Binding AvailableProfiles}"
-                                                  SelectedItem="{Binding SelectedProfile}"
+                                    <Grid ColumnDefinitions="*,Auto,Auto,Auto" IsVisible="{Binding !Hotkeys.IsEditingProfile}">
+                                        <ComboBox ItemsSource="{Binding Hotkeys.AvailableProfiles}"
+                                                  SelectedItem="{Binding Hotkeys.SelectedProfile}"
                                                   HorizontalAlignment="Stretch">
                                             <ComboBox.ItemTemplate>
                                                 <DataTemplate x:DataType="entities:HotkeyProfile">
@@ -626,53 +646,53 @@
                                                 </DataTemplate>
                                             </ComboBox.ItemTemplate>
                                         </ComboBox>
-                                        <Button Grid.Column="1" Content="Add"
-                                                Command="{Binding StartAddProfileCommand}"
+                                        <Button Grid.Column="1" Content="{Binding L.Strings.AddButton}"
+                                                Command="{Binding Hotkeys.StartAddProfileCommand}"
                                                 Classes="btn-primary" Margin="8,0,0,0" Cursor="Hand"/>
-                                        <Button Grid.Column="2" Content="Rename"
-                                                Command="{Binding StartRenameProfileCommand}"
+                                        <Button Grid.Column="2" Content="{Binding L.Strings.RenameButton}"
+                                                Command="{Binding Hotkeys.StartRenameProfileCommand}"
                                                 Classes="btn-primary" Margin="6,0,0,0" Cursor="Hand"/>
-                                        <Button Grid.Column="3" Content="Delete"
-                                                Command="{Binding DeleteProfileCommand}"
+                                        <Button Grid.Column="3" Content="{Binding L.Strings.DeleteButton}"
+                                                Command="{Binding Hotkeys.DeleteProfileCommand}"
                                                 Classes="btn-danger" Margin="6,0,0,0" Cursor="Hand"/>
                                     </Grid>
 
                                     <!-- Editable Row Swap Mode -->
-                                    <Grid ColumnDefinitions="*,Auto,Auto" IsVisible="{Binding IsEditingProfile}">
-                                        <TextBox Text="{Binding NewProfileName}"
-                                                 PlaceholderText="Profile name..."
+                                    <Grid ColumnDefinitions="*,Auto,Auto" IsVisible="{Binding Hotkeys.IsEditingProfile}">
+                                        <TextBox Text="{Binding Hotkeys.NewProfileName}"
+                                                 PlaceholderText="{Binding L.Strings.ProfileNamePlaceholder}"
                                                  HorizontalAlignment="Stretch">
                                             <TextBox.KeyBindings>
-                                                <KeyBinding Gesture="Enter" Command="{Binding ConfirmAddProfileCommand}"/>
+                                                <KeyBinding Gesture="Enter" Command="{Binding Hotkeys.ConfirmAddProfileCommand}"/>
                                             </TextBox.KeyBindings>
                                         </TextBox>
-                                        <Button Grid.Column="1" Content="Save"
-                                                Command="{Binding ConfirmAddProfileCommand}"
+                                        <Button Grid.Column="1" Content="{Binding L.Strings.SaveButton}"
+                                                Command="{Binding Hotkeys.ConfirmAddProfileCommand}"
                                                 Classes="btn-primary" Margin="8,0,0,0" Cursor="Hand"/>
-                                        <Button Grid.Column="2" Content="Cancel"
-                                                Command="{Binding CancelAddProfileCommand}"
+                                        <Button Grid.Column="2" Content="{Binding L.Strings.CancelButton}"
+                                                Command="{Binding Hotkeys.CancelAddProfileCommand}"
                                                 Classes="btn-danger" Margin="6,0,0,0" Cursor="Hand"/>
                                     </Grid>
                                 </Panel>
 
                                 <Border Classes="card-section">
                                     <StackPanel Spacing="10">
-                                        <TextBlock Text="Add Phrase Shortcut" Classes="field-label"/>
+                                        <TextBlock Text="{Binding L.Strings.AddPhraseShortcutLabel}" Classes="field-label"/>
                                         <Grid ColumnDefinitions="160,*,Auto">
                                             <!-- Phrase Hotkey Detection -->
                                             <Button Classes="hotkey-btn"
-                                                    Classes.recording="{Binding IsRecordingPhraseHotkey}"
-                                                    Content="{Binding PhraseHotkeyDisplayText}"
-                                                    Command="{Binding ToggleRecordingPhraseHotkeyCommand}"
+                                                    Classes.recording="{Binding Hotkeys.IsRecordingPhraseHotkey}"
+                                                    Content="{Binding Hotkeys.PhraseHotkeyDisplayText}"
+                                                    Command="{Binding Hotkeys.ToggleRecordingPhraseHotkeyCommand}"
                                                     HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Margin="0,0,6,0"/>
-                                            <TextBox Grid.Column="1" Text="{Binding NewHotkeyPhrase}" PlaceholderText="Phrase to synthesize" Margin="0,0,6,0"/>
-                                            <Button Grid.Column="2" Content="Add" Command="{Binding AddHotkeyPhraseCommand}" Classes="btn-primary" Cursor="Hand"/>
+                                            <TextBox Grid.Column="1" Text="{Binding Hotkeys.NewHotkeyPhrase}" PlaceholderText="{Binding L.Strings.PhraseToSynthesizePlaceholder}" Margin="0,0,6,0"/>
+                                            <Button Grid.Column="2" Content="{Binding L.Strings.AddButton}" Command="{Binding Hotkeys.AddHotkeyPhraseCommand}" Classes="btn-primary" Cursor="Hand"/>
                                         </Grid>
                                         <TextBlock Text="{Binding ModelStatusMessage}" Foreground="{StaticResource DangerBrush}" TextWrapping="Wrap"
                                                    IsVisible="{Binding ModelStatusMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
                                     </StackPanel>
                                 </Border>
-                                <ListBox ItemsSource="{Binding HotkeyEntries}" Height="180" Classes="data-list">
+                                <ListBox ItemsSource="{Binding Hotkeys.HotkeyEntries}" Height="180" Classes="data-list">
                                     <ListBox.ItemTemplate>
                                         <DataTemplate x:DataType="entities:HotkeyEntry">
                                             <Grid ColumnDefinitions="120,*,Auto,Auto">
@@ -680,8 +700,8 @@
                                                 <TextBlock Grid.Column="1" Text="{Binding Text}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
                                                 <Panel Grid.Column="2" Margin="0,0,4,0">
                                                     <Button Name="PlayHotkeyBtn" Content="▶"
-                                                            AutomationProperties.Name="Play Hotkey Phrase"
-                                                            Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).PlayHotkeyPhraseCommand}"
+                                                            AutomationProperties.Name="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).L.Strings.PlayHotkeyPhraseAria}"
+                                                            Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).Hotkeys.PlayHotkeyPhraseCommand}"
                                                             CommandParameter="{Binding Id}" Classes="btn-icon"/>
                                                     <Popup IsOpen="{Binding IsPointerOver, ElementName=PlayHotkeyBtn}"
                                                            PlacementTarget="{Binding ElementName=PlayHotkeyBtn}"
@@ -689,14 +709,14 @@
                                                            VerticalOffset="-4"
                                                            IsLightDismissEnabled="False">
                                                         <Border Classes="tooltip-popup">
-                                                            <TextBlock Text="Play" Classes="tooltip-popup-text"/>
+                                                            <TextBlock Text="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).L.Strings.PlayButton}" Classes="tooltip-popup-text"/>
                                                         </Border>
                                                     </Popup>
                                                 </Panel>
                                                 <Panel Grid.Column="3">
                                                     <Button Name="DeleteHotkeyBtn" Content="✕"
-                                                            AutomationProperties.Name="Delete Hotkey"
-                                                            Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).DeleteHotkeyPhraseCommand}"
+                                                            AutomationProperties.Name="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).L.Strings.DeleteHotkeyAria}"
+                                                            Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).Hotkeys.DeleteHotkeyPhraseCommand}"
                                                             CommandParameter="{Binding Id}" Classes="btn-icon btn-delete"/>
                                                     <Popup IsOpen="{Binding IsPointerOver, ElementName=DeleteHotkeyBtn}"
                                                            PlacementTarget="{Binding ElementName=DeleteHotkeyBtn}"
@@ -704,7 +724,7 @@
                                                            VerticalOffset="-4"
                                                            IsLightDismissEnabled="False">
                                                         <Border Classes="tooltip-popup">
-                                                            <TextBlock Text="Delete" Classes="tooltip-popup-text"/>
+                                                            <TextBlock Text="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).L.Strings.DeleteButton}" Classes="tooltip-popup-text"/>
                                                         </Border>
                                                     </Popup>
                                                 </Panel>
@@ -718,35 +738,35 @@
                             <!-- History Tab -->
                             <StackPanel Spacing="16" IsVisible="{Binding SelectedTab, Converter={x:Static ObjectConverters.Equal}, ConverterParameter={x:Static vm:AdvancedTab.History}}">
                                 <Grid ColumnDefinitions="*,Auto">
-                                    <TextBlock Text="Synthesis History" Classes="section-title"/>
-                                    <Button Grid.Column="1" Content="Clear All" Command="{Binding ClearHistoryCommand}" Classes="btn-danger" Cursor="Hand"/>
+                                    <TextBlock Text="{Binding L.Strings.SynthesisHistoryTitle}" Classes="section-title"/>
+                                    <Button Grid.Column="1" Content="{Binding L.Strings.ClearAllButton}" Command="{Binding History.ClearAllCommand}" Classes="btn-danger" Cursor="Hand"/>
                                 </Grid>
-                                <ListBox ItemsSource="{Binding HistoryEntries}" Height="240" Classes="data-list">
+                                <ListBox ItemsSource="{Binding History.Entries}" Height="240" Classes="data-list">
                                     <ListBox.ItemTemplate>
                                         <DataTemplate x:DataType="entities:HistoryEntry">
                                             <Grid ColumnDefinitions="*,Auto,Auto">
                                                 <TextBlock Text="{Binding Text}" TextTrimming="CharacterEllipsis" MaxLines="1" VerticalAlignment="Center"/>
                                                 <Panel Grid.Column="1" Margin="4,0">
-                                                    <Button Name="PlayHistoryBtn" AutomationProperties.Name="Play History Entry" Content="▶" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).PlayHistoryItemCommand}" CommandParameter="{Binding Id}" Classes="btn-icon"/>
+                                                    <Button Name="PlayHistoryBtn" AutomationProperties.Name="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).L.Strings.PlayHistoryEntryAria}" Content="▶" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).History.PlayItemCommand}" CommandParameter="{Binding Id}" Classes="btn-icon"/>
                                                     <Popup IsOpen="{Binding IsPointerOver, ElementName=PlayHistoryBtn}"
                                                            PlacementTarget="{Binding ElementName=PlayHistoryBtn}"
                                                            Placement="Top"
                                                            VerticalOffset="-4"
                                                            IsLightDismissEnabled="False">
                                                         <Border Classes="tooltip-popup">
-                                                            <TextBlock Text="Play" Classes="tooltip-popup-text"/>
+                                                            <TextBlock Text="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).L.Strings.PlayButton}" Classes="tooltip-popup-text"/>
                                                         </Border>
                                                     </Popup>
                                                 </Panel>
                                                 <Panel Grid.Column="2">
-                                                    <Button Name="DeleteHistoryBtn" AutomationProperties.Name="Delete History Entry" Content="✕" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).DeleteHistoryItemCommand}" CommandParameter="{Binding Id}" Classes="btn-icon btn-delete"/>
+                                                    <Button Name="DeleteHistoryBtn" AutomationProperties.Name="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).L.Strings.DeleteHistoryEntryAria}" Content="✕" Command="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).History.DeleteItemCommand}" CommandParameter="{Binding Id}" Classes="btn-icon btn-delete"/>
                                                     <Popup IsOpen="{Binding IsPointerOver, ElementName=DeleteHistoryBtn}"
                                                            PlacementTarget="{Binding ElementName=DeleteHistoryBtn}"
                                                            Placement="Top"
                                                            VerticalOffset="-4"
                                                            IsLightDismissEnabled="False">
                                                         <Border Classes="tooltip-popup">
-                                                            <TextBlock Text="Delete" Classes="tooltip-popup-text"/>
+                                                            <TextBlock Text="{Binding $parent[Window].((vm:SettingsViewModel)DataContext).L.Strings.DeleteButton}" Classes="tooltip-popup-text"/>
                                                         </Border>
                                                     </Popup>
                                                 </Panel>

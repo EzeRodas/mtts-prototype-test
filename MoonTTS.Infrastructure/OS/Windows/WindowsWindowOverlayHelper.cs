@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using MoonTTS.Core.Utilities;
 using MoonTTS.Domain.Interfaces;
 
 namespace MoonTTS.Infrastructure.OS.Windows;
@@ -13,6 +14,7 @@ namespace MoonTTS.Infrastructure.OS.Windows;
         - IsFullscreenApplication(nint window) : bool
         - MarkFullscreen(nint window, bool fullscreen) : void
         - GetTaskbarList() : nint
+        - Dispose() : void
         - LibWin32
 */
 
@@ -20,7 +22,7 @@ namespace MoonTTS.Infrastructure.OS.Windows;
    taskbar behind it. When the HUD takes focus, explorer.exe would raise the taskbar again unless the HUD is
    marked as a fullscreen window through ITaskbarList2::MarkFullscreenWindow, which is what this helper does.
    Only documented shell / user32 APIs of the Moon-TTS own windows are used; nothing touches other processes. */
-public sealed class WindowsWindowOverlayHelper : IWindowOverlayHelper
+public sealed class WindowsWindowOverlayHelper : IWindowOverlayHelper, IDisposable
 {
     /* Foreground window before the HUD was shown, focus is handed back to it when the HUD hides */
     private nint _previousForegroundWindow;
@@ -88,6 +90,7 @@ public sealed class WindowsWindowOverlayHelper : IWindowOverlayHelper
     public void ActivateOverlayWindow(nint windowHandle)
     {
         if (windowHandle == 0) return;
+        LibWin32.BringWindowToTop(windowHandle);
         LibWin32.SetForegroundWindow(windowHandle);
     }
 
@@ -124,15 +127,15 @@ public sealed class WindowsWindowOverlayHelper : IWindowOverlayHelper
     }
 
     /* A window is a fullscreen application when it covers its whole monitor and is not the desktop itself */
-    private static bool IsFullscreenApplication(nint window)
+    private static unsafe bool IsFullscreenApplication(nint window)
     {
         if (window == LibWin32.GetShellWindow() || window == LibWin32.GetDesktopWindow())
             return false;
 
-        var className = new char[64];
-        int length = LibWin32.GetClassNameW(window, className, className.Length);
-        string name = new(className, 0, length);
-        if (name is "Progman" or "WorkerW")
+        char* className = stackalloc char[64];
+        int length = LibWin32.GetClassNameW(window, className, 64);
+        ReadOnlySpan<char> name = new(className, Math.Clamp(length, 0, 64));
+        if (name.SequenceEqual("Progman") || name.SequenceEqual("WorkerW"))
             return false;
 
         if (!LibWin32.GetWindowRect(window, out LibWin32.RECT windowRect))
@@ -162,11 +165,30 @@ public sealed class WindowsWindowOverlayHelper : IWindowOverlayHelper
             var markFullscreenWindow = (delegate* unmanaged[Stdcall]<nint, nint, int, int>)vtable[LibWin32.VtblMarkFullscreenWindow];
             int hr = markFullscreenWindow(taskbarList, window, fullscreen ? 1 : 0);
             if (hr < 0)
-                Console.Error.WriteLine($"[WindowsWindowOverlayHelper] MarkFullscreenWindow failed with HRESULT 0x{hr:X8}");
+                AppLogger.Warning("WindowsWindowOverlayHelper", $"MarkFullscreenWindow failed with HRESULT 0x{hr:X8}");
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[WindowsWindowOverlayHelper] MarkFullscreenWindow failed: {ex.Message}");
+            AppLogger.Warning("WindowsWindowOverlayHelper", $"MarkFullscreenWindow failed: {ex.Message}");
+        }
+    }
+
+    /* Releases the cached ITaskbarList2 COM object on process exit */
+    public unsafe void Dispose()
+    {
+        nint taskbar = Interlocked.Exchange(ref _taskbarList, 0);
+        if (taskbar != 0)
+        {
+            try
+            {
+                nint* vtable = *(nint**)taskbar;
+                var release = (delegate* unmanaged[Stdcall]<nint, uint>)vtable[LibWin32.VtblRelease];
+                release(taskbar);
+            }
+            catch
+            {
+                /* Ignore COM release errors during shutdown */
+            }
         }
     }
 
@@ -246,6 +268,9 @@ public sealed class WindowsWindowOverlayHelper : IWindowOverlayHelper
         public static extern nint GetForegroundWindow();
 
         [DllImport("user32.dll")]
+        public static extern bool BringWindowToTop(nint hWnd);
+
+        [DllImport("user32.dll")]
         public static extern bool SetForegroundWindow(nint hWnd);
 
         [DllImport("user32.dll")]
@@ -261,7 +286,7 @@ public sealed class WindowsWindowOverlayHelper : IWindowOverlayHelper
         public static extern nint GetDesktopWindow();
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        public static extern int GetClassNameW(nint hWnd, [Out] char[] className, int maxCount);
+        public static extern unsafe int GetClassNameW(nint hWnd, char* className, int maxCount);
 
         [DllImport("user32.dll")]
         public static extern bool GetWindowRect(nint hWnd, out RECT rect);

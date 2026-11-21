@@ -1,12 +1,16 @@
 namespace MoonTTS.Domain.Common;
 
 using System;
+using System.Diagnostics.CodeAnalysis;
 
 /* Same as result but holds a value. Sepparated them for visual clarity */
 
-public struct Result<T>
+public readonly struct Result<T>
 {
+    [MemberNotNullWhen(true, nameof(Value))]
     public bool IsSuccess { get; }
+
+    [MemberNotNullWhen(false, nameof(Value))]
     public bool IsFailure => !IsSuccess;
     public T? Value { get; }
     public string? ErrorMessage { get; }

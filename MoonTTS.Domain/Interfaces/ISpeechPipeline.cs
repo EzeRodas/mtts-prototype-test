@@ -25,6 +25,11 @@ public interface ISpeechPipeline
         string wavPath,
         CancellationToken cancellationToken = default);
 
+    /* Plays a pre-rendered WAV file through the active pipeline session and reports its duration and PCM byte count */
+    Task<Result<(TimeSpan Duration, int PcmBytes)>> PlayWavFileWithInfoAsync(
+        string wavPath,
+        CancellationToken cancellationToken = default);
+
     /* Pauses the active speech playback */
     void Pause();
 

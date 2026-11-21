@@ -9,6 +9,7 @@ namespace MoonTTS.Infrastructure.Persistence;
 
 /* Main configs */
 [JsonSerializable(typeof(AppConfig))]
+[JsonSerializable(typeof(UiStrings))]
 [JsonSerializable(typeof(List<DictionaryEntry>))]
 [JsonSerializable(typeof(ProfileDataStore))]
 [JsonSerializable(typeof(List<HotkeyEntry>))]
@@ -19,7 +20,7 @@ namespace MoonTTS.Infrastructure.Persistence;
 [JsonSerializable(typeof(DaemonResponse))]
 [JsonSerializable(typeof(AudioFormat))]
 
-[JsonSourceGenerationOptions(WriteIndented = true, Converters = new[] { typeof(ModelIdJsonConverter) })]
+[JsonSourceGenerationOptions(WriteIndented = true, ReadCommentHandling = System.Text.Json.JsonCommentHandling.Skip, Converters = new[] { typeof(ModelIdJsonConverter) })]
 
 /* Per-model preferences */
 [JsonSerializable(typeof(EngineConfig))]

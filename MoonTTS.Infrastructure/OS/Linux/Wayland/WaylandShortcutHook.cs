@@ -62,29 +62,31 @@ public class WaylandShortcutHook : IGlobalShortcutHook
             Console.WriteLine($"[WaylandShortcutHook] Registry.Register warning: {ex.Message}");
         }
 
-        /* Subscribes to GlobalShortcuts activated signal */
-        _activationWatcher = await _connection.WatchSignalAsync<string>(
-            sender: null,
+        /* Subscribes to GlobalShortcuts activated signal filtered strictly to the desktop portal and active session */
+        _activationWatcher = await _connection.WatchSignalAsync<(string SessionPath, string ShortcutId)>(
+            sender: "org.freedesktop.portal.Desktop",
             path: "/org/freedesktop/portal/desktop",
             @interface: "org.freedesktop.portal.GlobalShortcuts",
             signal: "Activated",
             reader: (Message msg, object? _) =>
             {
                 var reader = msg.GetBodyReader();
-                _ = reader.ReadObjectPath(); /* session_handle */
-                return reader.ReadString();  /* shortcut_id */
+                string sessionPath = reader.ReadObjectPath().ToString();
+                string shortcutId = reader.ReadString();
+                return (sessionPath, shortcutId);
             },
             handler: notification =>
             {
-                if (notification.Type == NotificationType.Value && !string.IsNullOrEmpty(notification.Value))
+                if (notification.Type == NotificationType.Value
+                    && !string.IsNullOrEmpty(notification.Value.ShortcutId)
+                    && string.Equals(notification.Value.SessionPath, _sessionHandle, StringComparison.Ordinal))
                 {
-                    string logicalId = ExtractLogicalShortcutId(notification.Value);
-                    Console.WriteLine($"[WaylandShortcutHook] Shortcut Activated: {notification.Value} -> {logicalId}");
+                    string logicalId = ExtractLogicalShortcutId(notification.Value.ShortcutId);
                     OnShortcutTriggered?.Invoke(logicalId);
                 }
                 else if (notification.Exception != null)
                 {
-                    Console.WriteLine($"[WaylandShortcutHook] Activation watcher error: {notification.Exception}");
+                    Console.Error.WriteLine($"[WaylandShortcutHook] Activation watcher error: {notification.Exception}");
                 }
             },
             flags: ObserverFlags.None,
@@ -391,13 +393,13 @@ public class WaylandShortcutHook : IGlobalShortcutHook
         }
     }
 
-    /* Disposes the listener and closes any active portal session before disconnecting */
+    /* Disposes the listener and closes any active portal session with a bounded timeout so shutdown cannot deadlock */
     public void Dispose()
     {
         _activationWatcher?.Dispose();
         try
         {
-            CleanupSessionAsync().GetAwaiter().GetResult();
+            Task.Run(CleanupSessionAsync).Wait(500);
         }
         catch
         {

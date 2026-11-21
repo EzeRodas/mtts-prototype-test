@@ -1,6 +1,4 @@
-using System.Text.Json;
 using System.Text.RegularExpressions;
-using MoonTTS.Core.Utilities;
 using MoonTTS.Domain.Common;
 using MoonTTS.Domain.Constants;
 using MoonTTS.Domain.Entities;
@@ -63,7 +61,7 @@ public class DictionaryManager
         string trimmedOriginal = TrimString(original, MaxLength);
         string trimmedSpelling = TrimString(spelling, MaxLength);
 
-        if (_repo.DictionaryEntries.Any(e => string.Equals(e.Original, trimmedOriginal, StringComparison.OrdinalIgnoreCase)))
+        if (HasConflictingEntry(_repo.DictionaryEntries, trimmedOriginal, caseSensitive, excludeId: null))
             return Result.Failure($"An entry for '{trimmedOriginal}' already exists.");
 
         var entries = _repo.DictionaryEntries.ToList();
@@ -95,7 +93,7 @@ public class DictionaryManager
         string trimmedOriginal = TrimString(original, MaxLength);
         string trimmedSpelling = TrimString(spelling, MaxLength);
 
-        if (entries.Any(e => e.Id != id && string.Equals(e.Original, trimmedOriginal, StringComparison.OrdinalIgnoreCase)))
+        if (HasConflictingEntry(entries, trimmedOriginal, caseSensitive, excludeId: id))
             return Result.Failure($"Another entry for '{trimmedOriginal}' already exists.");
 
         entry.Original = trimmedOriginal;
@@ -191,8 +189,27 @@ public class DictionaryManager
         }
 
         string combinedPattern = string.Join("|", parts);
-        var compiledRegex = new Regex(combinedPattern, RegexOptions.CultureInvariant);
+        var compiledRegex = new Regex(combinedPattern, RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
         _compiled = new CompiledDictionary(compiledRegex, exactMap, ignoreCaseMap);
+    }
+
+    /* Checks whether an existing entry conflicts with the proposed original word and case sensitivity */
+    private static bool HasConflictingEntry(
+        IReadOnlyList<DictionaryEntry> entries,
+        string original,
+        bool caseSensitive,
+        Guid? excludeId)
+    {
+        return entries.Any(e =>
+        {
+            if (excludeId.HasValue && e.Id == excludeId.Value)
+                return false;
+
+            if (caseSensitive && e.CaseSensitive)
+                return string.Equals(e.Original, original, StringComparison.Ordinal);
+
+            return string.Equals(e.Original, original, StringComparison.OrdinalIgnoreCase);
+        });
     }
 
     /* If the string received goes over the limit gets trimmed, otherwise remains untouched */
