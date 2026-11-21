@@ -205,7 +205,7 @@ for mbr_src in phsource/mbrola/*; do
     ESPEAK_DATA_PATH="$ESPEAK_DATA_DIR" "src/espeak-ng${EXE_EXT}" --compile-mbrola="phsource/mbrola/${mbr_name}"
 done
 
-LANGS="af ar pt fr zh hr cs de et en es el he hu is id hi fa it ja la lt ms nl mi pl ro sv te tr"
+LANGS="af ar pt fr zh hr cs da de et en es el fi he hu is id hi fa it ja ko la lt ms nl mi pl ro ru sv sw te tr"
 for l in $LANGS; do
     (cd dictsource && ESPEAK_DATA_PATH="$ESPEAK_DATA_DIR" "../src/espeak-ng${EXE_EXT}" --compile="$l")
 done

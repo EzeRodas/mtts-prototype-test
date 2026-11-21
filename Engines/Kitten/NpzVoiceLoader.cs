@@ -4,16 +4,15 @@ namespace MoonTTS.Engine.Kitten;
 
 /* File Structure:
         - Load(string npzFilePath) : Dictionary<string, float[]>
-        - GetStyleVector(Dictionary<string, float[]> voices, string voiceKey, int textLength) : float[]
+        - GetStyleVector(Dictionary<string, float[]> voices, string voiceKey, int tokenCount) : float[]
 */
 
 /* Reads NumPy .npz voice embedding archives into in-memory float arrays */
 public static class NpzVoiceLoader
 {
     private const int EmbeddingDim = 256;
-    private const int MaxRefLen = 400;
 
-    /* Parses all (400, 256) .npy float matrices inside the .npz archive */
+    /* Parses all (N, 256) .npy float matrices inside the .npz archive */
     public static Dictionary<string, float[]> Load(string npzFilePath)
     {
         var result = new Dictionary<string, float[]>(StringComparer.OrdinalIgnoreCase);
@@ -55,8 +54,8 @@ public static class NpzVoiceLoader
         return result;
     }
 
-    /* Slices a 256-dimensional style vector at Math.Min(textLength, 399) */
-    public static float[] GetStyleVector(Dictionary<string, float[]> voices, string voiceKey, int textLength)
+    /* Slices a 256-dimensional style vector at Clamp(tokenCount - 1, 0, packRows - 1) matching KittenTTS 2.0 */
+    public static float[] GetStyleVector(Dictionary<string, float[]> voices, string voiceKey, int tokenCount)
     {
         if (!voices.TryGetValue(voiceKey, out float[]? matrix) || matrix == null || matrix.Length < EmbeddingDim)
         {
@@ -66,7 +65,7 @@ public static class NpzVoiceLoader
         }
 
         int maxIndex = (matrix.Length / EmbeddingDim) - 1;
-        int refId = Math.Clamp(textLength, 0, Math.Min(maxIndex, MaxRefLen - 1));
+        int refId = Math.Clamp(tokenCount - 1, 0, maxIndex);
 
         float[] style = new float[EmbeddingDim];
         Array.Copy(matrix, refId * EmbeddingDim, style, 0, EmbeddingDim);

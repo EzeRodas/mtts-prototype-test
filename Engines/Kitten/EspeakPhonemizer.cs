@@ -6,52 +6,150 @@ using System.Text.RegularExpressions;
 namespace MoonTTS.Engine.Kitten;
 
 /* File Structure:
+        - IsLanguageSupported(string language) : bool
         - EnsureInitialized() : void
-        - Phonemize(string text) : string
+        - Phonemize(string text, string language, string phonemizerVersion) : string
+        - Tokenize(string phonemizedText, IReadOnlyDictionary<string, int> vocab) : long[]
+        - SetEspeakVoiceIfNeeded(string espeakVoice) : void
+        - PhonemizeRaw(string text) : string
         - PhonemizeClause(string clause, StringBuilder sb) : void
-        - Tokenize(string phonemizedText) : long[]
-        - ResolveLibrary(string libraryName, Assembly assembly, DllImportSearchPath? searchPath) : IntPtr
-        - BuildSymbolMap() : Dictionary<char, int>
+        - ApplyEnglishPostProcessing(string phonemes) : string
+        - ApplyGenericEspeakPostProcessing(string phonemes) : string
+        - ApplyReplacements(string input, (string Old, string New)[] replacements) : string
         - ClauseOrTokenRegex() : Regex
-        - PhonemeTokenRegex() : Regex
+        - SyllabicRegex() : Regex
+        - HindiFlapWordRegex() : Regex
+        - HindiFlapInsideWordRegex() : Regex
+        - ResolveLibrary(string libraryName, Assembly assembly, DllImportSearchPath? searchPath) : IntPtr
         - espeak_Initialize(int output, int buflength, string? path, int options) : int
         - espeak_SetVoiceByName(string name) : int
         - espeak_TextToPhonemes(byte** textptr, int textmode, int phonememode) : byte*
 */
 
-/* Native phonemizer wrapping libespeak-ng and mapping IPA tokens to the StyleTTS2/KittenTTS vocabulary */
+/* Native multilingual phonemizer wrapping libespeak-ng with Misaki/KittenTTS 2.0 IPA post-processing and folding */
 public static unsafe partial class EspeakPhonemizer
 {
     private const string LibraryName = "espeak-ng";
     private const int AudioOutputSynchronous = 0x02;
     private const int EspeakCharsUtf8 = 1;
-    private const int EspeakPhonemesIpa = 0x02;
+
+    /* espeakPHONEMES_IPA (0x02) | espeakPHONEMES_TIE (0x80) with '^' tie character in bits 8..23 */
+    private const int EspeakPhonemesIpaWithTie = ('^' << 8) | 0x80 | 0x02;
+    private const int EndToken = 10;
 
     private static readonly object s_initLock = new();
     private static bool s_isInitialized;
     private static int s_resolverRegistered;
+    private static string s_activeEspeakVoice = string.Empty;
 
-    /* 178-character KittenTTS TextCleaner symbol vocabulary */
-    private static readonly Dictionary<char, int> s_symbolMap = BuildSymbolMap();
-
-    /* Builds the 178-symbol character index dictionary matching kittenml's TextCleaner */
-    private static Dictionary<char, int> BuildSymbolMap()
+    /* KittenTTS 2.0 language code -> libespeak-ng voice name */
+    private static readonly Dictionary<string, string> s_espeakVoices = new(StringComparer.OrdinalIgnoreCase)
     {
-        const string pad = "$";
-        const string punctuation = ";:,.!?¡¿—…\"«»\"\" ";
-        const string letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-        const string lettersIpa = "ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̩'ᵻ";
+        ["en"] = "en-us",
+        ["en-us"] = "en-us",
+        ["en-gb"] = "en-gb",
+        ["de"] = "de",
+        ["es"] = "es",
+        ["it"] = "it",
+        ["pt"] = "pt-br",
+        ["ru"] = "ru",
+        ["hi"] = "hi",
+        ["fr"] = "fr-fr",
+        ["da"] = "da",
+        ["fi"] = "fi",
+        ["ko"] = "ko",
+        ["nl"] = "nl",
+        ["sv"] = "sv",
+        ["sw"] = "sw",
+        ["tr"] = "tr"
+    };
 
-        string symbols = pad + punctuation + letters + lettersIpa;
-        var map = new Dictionary<char, int>(symbols.Length);
-        for (int i = 0; i < symbols.Length; i++)
-        {
-            map.TryAdd(symbols[i], i);
-        }
-        return map;
-    }
+    /* Misaki EspeakFallback E2M table for English (sorted longest-first) */
+    private static readonly (string Old, string New)[] s_englishE2m =
+    [
+        ("ʔˌn\u0329", "ʔn"),
+        ("ʔn\u0329", "ʔn"),
+        ("a^ɪ", "I"),
+        ("a^ʊ", "W"),
+        ("d^ʒ", "ʤ"),
+        ("e^ɪ", "A"),
+        ("t^ʃ", "ʧ"),
+        ("ɔ^ɪ", "Y"),
+        ("ə^l", "ᵊl"),
+        ("ʲo", "jo"),
+        ("ʲə", "jə"),
+        ("e", "A"),
+        ("ʲ", ""),
+        ("ɚ", "əɹ"),
+        ("r", "ɹ"),
+        ("x", "k"),
+        ("ç", "k"),
+        ("ɐ", "ə"),
+        ("ɬ", "l"),
+        ("\u0303", "")
+    ];
 
-    /* Registers native resolver and initializes libespeak-ng with en-us voice */
+    /* Misaki EspeakG2P e2m table for non-English languages */
+    private static readonly (string Old, string New)[] s_genericE2m =
+    [
+        ("a^ɪ", "I"),
+        ("a^ʊ", "W"),
+        ("d^z", "ʣ"),
+        ("d^ʒ", "ʤ"),
+        ("e^ɪ", "A"),
+        ("o^ʊ", "O"),
+        ("s^s", "S"),
+        ("t^s", "ʦ"),
+        ("t^ʃ", "ʧ"),
+        ("ɔ^ɪ", "Y"),
+        ("ə^ʊ", "Q")
+    ];
+
+    /* KittenTTS 2.0 phonemize_v1 FOLD table */
+    private static readonly (string Old, string New)[] s_foldV1 =
+    [
+        ("\u032a", ""),
+        ("\u0329", ""),
+        ("\u030d", ""),
+        ("\u032f", ""),
+        ("\u026d", "l"),
+        ("\u026b", "l"),
+        ("\u0275", "\u00f8"),
+        ("\u03b5", "\u025b"),
+        ("\u0005", ""),
+        ("\u0006", ""),
+        ("\u0007", ""),
+        ("\u0008", ""),
+        ("{", ""),
+        ("}", ""),
+        ("[", ""),
+        ("]", ""),
+        ("\u00bf", ""),
+        ("\u00a1", ""),
+        ("\u202f", " ")
+    ];
+
+    /* Additional folds introduced in KittenTTS 2.0 phonemize_v2 (Mini) */
+    private static readonly (string Old, string New)[] s_foldExtraV2 =
+    [
+        ("\u2009", " "),
+        ("\t", " "),
+        ("«", ""),
+        ("»", ""),
+        ("‘", ""),
+        ("’", ""),
+        ("'", ""),
+        ("~", ""),
+        ("·", ""),
+        ("#", ""),
+        ("g", "ɡ")
+    ];
+
+    /* Returns true if the language is supported by the native eSpeak NG phonemizer */
+    public static bool IsLanguageSupported(string language) =>
+        !string.IsNullOrWhiteSpace(language) && s_espeakVoices.ContainsKey(language);
+
+    /* Registers the native library resolver and initializes libespeak-ng */
     public static void EnsureInitialized()
     {
         if (s_isInitialized)
@@ -74,42 +172,131 @@ public static unsafe partial class EspeakPhonemizer
             if (rate <= 0)
                 throw new InvalidOperationException($"espeak_Initialize failed with code {rate}.");
 
-            espeak_SetVoiceByName("en-us");
+            SetEspeakVoiceIfNeeded("en-us");
             s_isInitialized = true;
         }
     }
 
-    /* Converts text into IPA phonemes clause-by-clause while preserving punctuation and whitespace */
-    public static string Phonemize(string text)
+    /* Converts text in the specified language into Misaki/KittenTTS 2.0 IPA phonemes */
+    public static string Phonemize(string text, string language, string phonemizerVersion)
     {
         EnsureInitialized();
 
         if (string.IsNullOrWhiteSpace(text))
             return string.Empty;
 
-        var sb = new StringBuilder(text.Length * 2);
-        var matches = ClauseOrTokenRegex().Matches(text);
+        string lang = string.IsNullOrWhiteSpace(language) ? "en" : language.Trim().ToLowerInvariant();
+        if (!s_espeakVoices.TryGetValue(lang, out string? espeakVoice))
+            espeakVoice = "en-us";
 
+        bool isV2 = string.Equals(phonemizerVersion, "v2", StringComparison.OrdinalIgnoreCase);
+        bool isEnglish = lang is "en" or "en-us" or "en-gb";
+
+        string prepared = text;
+        if (isV2 && lang == "hi")
+        {
+            prepared = prepared.Replace("।", ".").Replace("॥", ".");
+        }
+
+        if (!isEnglish)
+        {
+            prepared = prepared
+                .Replace("«", "\u201c")
+                .Replace("»", "\u201d")
+                .Replace("(", "«")
+                .Replace(")", "»");
+        }
+
+        string rawPhonemes;
         lock (s_initLock)
         {
-            foreach (Match match in matches)
+            SetEspeakVoiceIfNeeded(espeakVoice);
+            rawPhonemes = PhonemizeRaw(prepared);
+        }
+
+        string processed = isEnglish
+            ? ApplyEnglishPostProcessing(rawPhonemes)
+            : ApplyGenericEspeakPostProcessing(rawPhonemes);
+
+        processed = ApplyReplacements(processed.Trim(), s_foldV1);
+        if (isV2)
+        {
+            processed = ApplyReplacements(processed, s_foldExtraV2);
+            if (lang == "hi")
             {
-                string token = match.Value;
-                if (char.IsLetterOrDigit(token[0]))
-                {
-                    PhonemizeClause(token, sb);
-                }
-                else
-                {
-                    sb.Append(token);
-                }
+                processed = processed.Replace("r.h", "ɽʰ");
+                processed = HindiFlapInsideWordRegex().Replace(processed, "ɽ");
+                if (HindiFlapWordRegex().IsMatch(text))
+                    processed = processed.Replace("r.", "ɽ");
+            }
+        }
+
+        return processed;
+    }
+
+    /* Tokenizes phonemized text using the loaded vocab.json and wraps with [0] + ids + [10, 0] */
+    public static long[] Tokenize(string phonemizedText, IReadOnlyDictionary<string, int> vocab)
+    {
+        if (string.IsNullOrWhiteSpace(phonemizedText))
+            return [0, EndToken, 0];
+
+        var indices = new List<long>(phonemizedText.Length + 3) { 0 };
+        vocab.TryGetValue(",", out int commaId);
+
+        foreach (char c in phonemizedText)
+        {
+            string key = c.ToString();
+            if (vocab.TryGetValue(key, out int id))
+            {
+                indices.Add(id);
+            }
+            else if ((c == '(' || c == ')') && commaId > 0)
+            {
+                indices.Add(commaId);
+            }
+        }
+
+        indices.Add(EndToken);
+        indices.Add(0);
+        return indices.ToArray();
+    }
+
+    /* Switches the active libespeak-ng voice only when the target language changes */
+    private static void SetEspeakVoiceIfNeeded(string espeakVoice)
+    {
+        if (string.Equals(s_activeEspeakVoice, espeakVoice, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        int err = espeak_SetVoiceByName(espeakVoice);
+        if (err != 0)
+            throw new InvalidOperationException($"espeak_SetVoiceByName('{espeakVoice}') failed with code {err}.");
+
+        s_activeEspeakVoice = espeakVoice;
+    }
+
+    /* Phonemizes text clause-by-clause while preserving punctuation and whitespace */
+    private static string PhonemizeRaw(string text)
+    {
+        var sb = new StringBuilder(text.Length * 2);
+        MatchCollection matches = ClauseOrTokenRegex().Matches(text);
+
+        foreach (Match match in matches)
+        {
+            string token = match.Value;
+            if (char.IsLetterOrDigit(token[0]))
+            {
+                PhonemizeClause(token, sb);
+            }
+            else
+            {
+                sb.Append(token);
             }
         }
 
         return sb.ToString();
     }
 
-    /* Invokes libespeak-ng on an entire contiguous word clause to preserve stress and heteronym context */
+    /* Invokes libespeak-ng on a contiguous word clause to preserve sentence stress and heteronym context */
     private static void PhonemizeClause(string clause, StringBuilder sb)
     {
         byte[] utf8 = Encoding.UTF8.GetBytes(clause + "\0");
@@ -119,7 +306,7 @@ public static unsafe partial class EspeakPhonemizer
             byte* cur = pUtf8;
             while (cur != null && *cur != 0)
             {
-                byte* ph = espeak_TextToPhonemes(&cur, EspeakCharsUtf8, EspeakPhonemesIpa);
+                byte* ph = espeak_TextToPhonemes(&cur, EspeakCharsUtf8, EspeakPhonemesIpaWithTie);
                 if (ph == null)
                     break;
 
@@ -136,41 +323,63 @@ public static unsafe partial class EspeakPhonemizer
         }
     }
 
-    /* Tokenizes phonemized text, adds start [0] and end [10, 0] tokens, and returns ONNX input_ids */
-    public static long[] Tokenize(string phonemizedText)
+    /* Applies Misaki EspeakFallback English (en-us) symbol normalization */
+    private static string ApplyEnglishPostProcessing(string phonemes)
     {
-        if (string.IsNullOrWhiteSpace(phonemizedText))
-            return [0, 10, 0];
+        string ps = ApplyReplacements(phonemes, s_englishE2m);
+        ps = SyllabicRegex().Replace(ps, "ᵊ$1").Replace("\u0329", "");
+        ps = ps
+            .Replace("o^ʊ", "O")
+            .Replace("ɜːɹ", "ɜɹ")
+            .Replace("ɜː", "ɜɹ")
+            .Replace("ɪə", "iə")
+            .Replace("ː", "")
+            .Replace("o", "ɔ")
+            .Replace("ɾ", "T")
+            .Replace("ʔ", "t")
+            .Replace("^", "");
+        return ps;
+    }
 
-        var tokens = PhonemeTokenRegex().Matches(phonemizedText)
-            .Select(m => m.Value);
+    /* Applies Misaki EspeakG2P symbol normalization for non-English languages */
+    private static string ApplyGenericEspeakPostProcessing(string phonemes)
+    {
+        string ps = ApplyReplacements(phonemes, s_genericE2m);
+        ps = ps
+            .Replace("^", "")
+            .Replace("-", "")
+            .Replace("«", "(")
+            .Replace("»", ")");
+        return ps;
+    }
 
-        string spaced = string.Join(" ", tokens);
-        var indices = new List<long>();
-
-        /* Prepend start token ($) */
-        indices.Add(0);
-
-        foreach (char c in spaced)
+    /* Sequentially applies a static replacement table to a phoneme string */
+    private static string ApplyReplacements(string input, (string Old, string New)[] replacements)
+    {
+        string result = input;
+        foreach ((string oldVal, string newVal) in replacements)
         {
-            if (s_symbolMap.TryGetValue(c, out int id))
-                indices.Add(id);
+            if (result.Contains(oldVal, StringComparison.Ordinal))
+                result = result.Replace(oldVal, newVal, StringComparison.Ordinal);
         }
-
-        /* Append end tokens: 10 (…) and 0 ($) */
-        indices.Add(10);
-        indices.Add(0);
-
-        return indices.ToArray();
+        return result;
     }
 
     /* Matches contiguous alphanumeric clauses, whitespace runs, or individual punctuation symbols */
     [GeneratedRegex(@"(?:[\p{L}\p{N}][\p{L}\p{N}'’]*(?:[^\S\r\n]+[\p{L}\p{N}][\p{L}\p{N}'’]*)*)|\s+|[^\p{L}\p{N}\s]")]
     private static partial Regex ClauseOrTokenRegex();
 
-    /* Matches phoneme word runs or non-whitespace punctuation symbols for Kitten tokenization */
-    [GeneratedRegex(@"\w+|[^\w\s]")]
-    private static partial Regex PhonemeTokenRegex();
+    /* Matches a non-whitespace character followed by the combining syllabic mark (U+0329) */
+    [GeneratedRegex(@"(\S)\u0329")]
+    private static partial Regex SyllabicRegex();
+
+    /* Matches Devanagari retroflex flap characters (precomposed or decomposed) */
+    [GeneratedRegex(@"[ड़ढ़]|[डढ]़")]
+    private static partial Regex HindiFlapWordRegex();
+
+    /* Matches eSpeak's internal Hindi flap marker "r." before non-punctuation characters */
+    [GeneratedRegex(@"r\.(?=[^\s.,?!;:…])")]
+    private static partial Regex HindiFlapInsideWordRegex();
 
     /* Resolves bundled or system libespeak-ng library across platforms */
     private static IntPtr ResolveLibrary(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)

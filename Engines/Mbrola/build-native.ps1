@@ -246,7 +246,7 @@ void unload_MBR(void) {}
     }
     Pop-Location
 
-    $Langs = @("af","ar","pt","fr","zh","hr","cs","de","et","en","es","el","he","hu","is","id","hi","fa","it","ja","la","lt","ms","nl","mi","pl","ro","ru","sv","te","tr")
+    $Langs = @("af","ar","pt","fr","zh","hr","cs","da","de","et","en","es","el","fi","he","hu","is","id","hi","fa","it","ja","ko","la","lt","ms","nl","mi","pl","ro","ru","sv","sw","te","tr")
     Push-Location "$EspeakSrc\dictsource"
     foreach ($l in $Langs) {
         & $ExeOut "--compile=$l"
